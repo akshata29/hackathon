@@ -1,0 +1,44 @@
+# Azure Developer CLI configuration
+# Reference: https://learn.microsoft.com/en-us/azure/developer/azure-developer-cli/azd-schema
+name: portfolio-advisor
+metadata:
+  template: portfolio-advisor@0.0.1
+  description: Multi-Agent Portfolio Advisory Platform — Microsoft Foundry + Agent Framework
+
+services:
+  backend:
+    project: ./backend
+    language: python
+    host: containerapp
+    docker:
+      path: ./backend/Dockerfile
+
+  frontend:
+    project: ./frontend
+    language: js
+    host: staticwebapp
+
+  mcp-yahoo-finance:
+    project: ./mcp-servers/yahoo-finance
+    language: python
+    host: containerapp
+    docker:
+      path: ./mcp-servers/yahoo-finance/Dockerfile
+
+  mcp-portfolio-db:
+    project: ./mcp-servers/portfolio-db
+    language: python
+    host: containerapp
+    docker:
+      path: ./mcp-servers/portfolio-db/Dockerfile
+
+infra:
+  provider: bicep
+  path: ./infra
+
+hooks:
+  postprovision:
+    shell: pwsh
+    run: ./scripts/post-provision.ps1
+    interactive: true
+    continueOnError: false

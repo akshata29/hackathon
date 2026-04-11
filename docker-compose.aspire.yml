@@ -1,0 +1,11 @@
+services:
+  aspire-dashboard:
+    image: mcr.microsoft.com/dotnet/aspire-dashboard:latest
+    container_name: aspire-dashboard
+    ports:
+      - "18888:18888"   # Browser UI  -> http://localhost:18888
+      - "14317:18889"   # OTLP gRPC   -> OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:14317
+    environment:
+      # Allow anonymous login in development — remove in shared environments
+      - DOTNET_DASHBOARD_UNSECURED_ALLOW_ANONYMOUS=true
+    restart: unless-stopped

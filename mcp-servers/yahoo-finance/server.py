@@ -1,0 +1,233 @@
+# ============================================================
+# Yahoo Finance MCP Server
+# Exposes financial market data tools via MCP (Model Context Protocol)
+# Deployed as an internal Container App; accessed by the backend via
+# client.get_mcp_tool() using the Container App service URL.
+#
+# Auth: Bearer token validation via X-Mcp-Auth header
+#       Token is a shared secret stored in Azure Key Vault
+# ============================================================
+
+import logging
+import os
+from functools import lru_cache
+
+import yfinance as yf
+from fastmcp import FastMCP
+from fastmcp.server.auth import StaticTokenVerifier
+from starlette.requests import Request
+
+from keyvault import get_mcp_auth_token
+
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Auth provider — validates the shared bearer token set by the backend
+# ---------------------------------------------------------------------------
+_AUTH_TOKEN = get_mcp_auth_token()
+auth_provider = StaticTokenVerifier(tokens={_AUTH_TOKEN: {"sub": "backend-service", "client_id": "backend"}})
+
+mcp = FastMCP(
+    name="yahoo-finance-mcp",
+    instructions=(
+        "You have access to real-time and historical financial market data via Yahoo Finance. "
+        "Use these tools to fetch stock quotes, fundamentals, analyst ratings, and recent news. "
+        "Data classification: PUBLIC market data. "
+        "Do NOT include any PII or personally identifiable information in tool arguments."
+    ),
+    auth=auth_provider,
+)
+
+
+# ---------------------------------------------------------------------------
+# Tools
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def get_quote(symbol: str) -> dict:
+    """
+    Get current stock quote for a given ticker symbol.
+
+    Args:
+        symbol: Stock ticker symbol (e.g. AAPL, MSFT, NVDA)
+
+    Returns:
+        dict with price, change, change_pct, volume, market_cap, pe_ratio, week_52_high, week_52_low
+    """
+    symbol = symbol.upper().strip()
+    try:
+        ticker = yf.Ticker(symbol)
+        info = ticker.fast_info
+        return {
+            "symbol": symbol,
+            "price": round(float(info.last_price or 0), 2),
+            "previous_close": round(float(info.previous_close or 0), 2),
+            "change": round(float((info.last_price or 0) - (info.previous_close or 0)), 2),
+            "change_pct": round(
+                float(((info.last_price or 0) - (info.previous_close or 0)) / max(info.previous_close or 1, 0.01) * 100),
+                2,
+            ),
+            "volume": int(info.last_volume or 0),
+            "market_cap": int(info.market_cap or 0),
+            "fifty_two_week_high": round(float(info.year_high or 0), 2),
+            "fifty_two_week_low": round(float(info.year_low or 0), 2),
+        }
+    except Exception as exc:
+        logger.warning("get_quote failed for %s: %s", symbol, exc)
+        return {"symbol": symbol, "error": str(exc)}
+
+
+@mcp.tool()
+def get_financials(symbol: str) -> dict:
+    """
+    Get key financial metrics and valuation ratios for a stock.
+
+    Args:
+        symbol: Stock ticker symbol
+
+    Returns:
+        dict with pe_ratio, forward_pe, peg_ratio, price_to_book, revenue_growth,
+        earnings_growth, return_on_equity, debt_to_equity, free_cash_flow_yield
+    """
+    symbol = symbol.upper().strip()
+    try:
+        info = yf.Ticker(symbol).info
+        return {
+            "symbol": symbol,
+            "pe_ratio": info.get("trailingPE"),
+            "forward_pe": info.get("forwardPE"),
+            "peg_ratio": info.get("pegRatio"),
+            "price_to_book": info.get("priceToBook"),
+            "price_to_sales_ttm": info.get("priceToSalesTrailing12Months"),
+            "revenue_growth_yoy": info.get("revenueGrowth"),
+            "earnings_growth_yoy": info.get("earningsGrowth"),
+            "return_on_equity": info.get("returnOnEquity"),
+            "return_on_assets": info.get("returnOnAssets"),
+            "debt_to_equity": info.get("debtToEquity"),
+            "current_ratio": info.get("currentRatio"),
+            "gross_margins": info.get("grossMargins"),
+            "operating_margins": info.get("operatingMargins"),
+            "profit_margins": info.get("profitMargins"),
+            "sector": info.get("sector"),
+            "industry": info.get("industry"),
+        }
+    except Exception as exc:
+        logger.warning("get_financials failed for %s: %s", symbol, exc)
+        return {"symbol": symbol, "error": str(exc)}
+
+
+@mcp.tool()
+def get_news(symbol: str, max_items: int = 5) -> list[dict]:
+    """
+    Get recent news headlines and summaries for a stock.
+
+    Args:
+        symbol: Stock ticker symbol
+        max_items: Maximum number of news items to return (default 5, max 10)
+
+    Returns:
+        list of dicts with title, publisher, link, published_at
+    """
+    symbol = symbol.upper().strip()
+    max_items = min(max(1, max_items), 10)
+    try:
+        ticker = yf.Ticker(symbol)
+        news = ticker.news or []
+        results = []
+        for item in news[:max_items]:
+            content = item.get("content", {})
+            results.append({
+                "title": content.get("title") or item.get("title", ""),
+                "publisher": (content.get("provider") or {}).get("displayName") or item.get("publisher", ""),
+                "link": (content.get("canonicalUrl") or {}).get("url") or item.get("link", ""),
+                "published_at": content.get("pubDate") or item.get("providerPublishTime", ""),
+                "summary": content.get("summary", ""),
+            })
+        return results
+    except Exception as exc:
+        logger.warning("get_news failed for %s: %s", symbol, exc)
+        return [{"symbol": symbol, "error": str(exc)}]
+
+
+@mcp.tool()
+def get_analyst_ratings(symbol: str) -> dict:
+    """
+    Get analyst consensus ratings and price targets for a stock.
+
+    Args:
+        symbol: Stock ticker symbol
+
+    Returns:
+        dict with recommendation, number_of_analysts, mean_target_price, high_target, low_target
+    """
+    symbol = symbol.upper().strip()
+    try:
+        info = yf.Ticker(symbol).info
+        return {
+            "symbol": symbol,
+            "recommendation": info.get("recommendationKey"),
+            "recommendation_mean": info.get("recommendationMean"),
+            "number_of_analyst_opinions": info.get("numberOfAnalystOpinions"),
+            "target_mean_price": info.get("targetMeanPrice"),
+            "target_high_price": info.get("targetHighPrice"),
+            "target_low_price": info.get("targetLowPrice"),
+            "target_median_price": info.get("targetMedianPrice"),
+        }
+    except Exception as exc:
+        logger.warning("get_analyst_ratings failed for %s: %s", symbol, exc)
+        return {"symbol": symbol, "error": str(exc)}
+
+
+@mcp.tool()
+def compare_stocks(symbols: list[str], metric: str = "pe_ratio") -> list[dict]:
+    """
+    Compare multiple stocks on a specific financial metric.
+
+    Args:
+        symbols: List of stock ticker symbols (max 5)
+        metric: Metric to compare — one of: pe_ratio, forward_pe, peg_ratio,
+                price_to_book, return_on_equity, debt_to_equity, profit_margins
+
+    Returns:
+        Sorted list of dicts with symbol and metric value
+    """
+    symbols = [s.upper().strip() for s in symbols[:5]]
+    metric_map = {
+        "pe_ratio": "trailingPE",
+        "forward_pe": "forwardPE",
+        "peg_ratio": "pegRatio",
+        "price_to_book": "priceToBook",
+        "return_on_equity": "returnOnEquity",
+        "debt_to_equity": "debtToEquity",
+        "profit_margins": "profitMargins",
+    }
+    yf_key = metric_map.get(metric, "trailingPE")
+    results = []
+    for sym in symbols:
+        try:
+            val = yf.Ticker(sym).info.get(yf_key)
+            results.append({"symbol": sym, metric: val})
+        except Exception as exc:
+            results.append({"symbol": sym, metric: None, "error": str(exc)})
+    return sorted(results, key=lambda x: (x[metric] is None, x[metric]))
+
+
+if __name__ == "__main__":
+    import asyncio
+    import sys
+    import uvicorn
+
+    # Suppress benign WinError 10054 (connection reset) from ProactorEventLoop
+    # when the MCP client closes the TCP connection after receiving the response.
+    if sys.platform == "win32":
+        def _suppress_connection_reset(loop, context):
+            exc = context.get("exception")
+            if isinstance(exc, ConnectionResetError):
+                return
+            loop.default_exception_handler(context)
+        asyncio.get_event_loop().set_exception_handler(_suppress_connection_reset)
+
+    port = int(os.getenv("PORT", "8001"))
+    uvicorn.run(mcp.http_app(), host="0.0.0.0", port=port)
