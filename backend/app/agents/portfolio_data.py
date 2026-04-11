@@ -49,25 +49,48 @@ class PortfolioDataAgent(BaseAgent):
         portfolio_mcp_url: str,
         user_token: str | None = None,
         mcp_auth_token: str | None = None,
+        raw_token: str | None = None,
+        settings=None,
         **kwargs,
     ) -> list:
         """
         Build the Portfolio MCP tool.
 
-        Security: The Portfolio MCP server enforces row-level security based on the
-        user identity propagated via the X-User-Id header.
+        Security (production — ENTRA_TENANT_ID + entra_client_secret set):
+          Uses OBOAuth: the user's Entra Bearer token is exchanged for an OBO
+          token scoped to api://<portfolio_mcp_client_id>/portfolio.read.
+          The MCP server validates this token via JWKS; the oid claim is used
+          for row-level security — no X-User-Id header needed or trusted.
 
-        Reference: https://learn.microsoft.com/en-us/azure/foundry/agents/how-to/tools/model-context-protocol
+        Security (dev mode):
+          Falls back to X-User-Id header + static MCP_AUTH_TOKEN bearer.
+          Both are required so the portfolio MCP can do RLS locally.
+
+        Reference:
+          https://learn.microsoft.com/en-us/azure/foundry/agents/how-to/tools/model-context-protocol
+          https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-on-behalf-of-flow
         """
         import httpx
         from agent_framework import MCPStreamableHTTPTool
+        from app.core.auth.obo import build_obo_http_client
 
-        http_client = httpx.AsyncClient(
-            headers={
-                "X-User-Id": user_token or "anonymous",
-                "Authorization": f"Bearer {mcp_auth_token or 'dev-portfolio-mcp-token'}",
-            },
+        mcp_client_id = getattr(settings, "portfolio_mcp_client_id", "") if settings else ""
+
+        # In dev mode, include X-User-Id so the MCP server can still do RLS
+        # via the header-based fallback path.
+        extra_headers: dict = {}
+        if not (settings and settings.entra_tenant_id and mcp_client_id and raw_token):
+            extra_headers["X-User-Id"] = user_token or "anonymous"
+
+        http_client = build_obo_http_client(
+            settings=settings,
+            raw_token=raw_token,
+            mcp_client_id=mcp_client_id,
+            scope_name="portfolio.read",
+            fallback_bearer=mcp_auth_token or "dev-portfolio-mcp-token",
+            extra_headers=extra_headers,
         )
+
         return [
             MCPStreamableHTTPTool(
                 name="PortfolioData",
@@ -83,6 +106,8 @@ def create_portfolio_agent(
     portfolio_mcp_url: str,
     user_token: str | None = None,
     mcp_auth_token: str | None = None,
+    raw_token: str | None = None,
+    settings=None,
 ):
     """Backward-compat factory — prefer PortfolioDataAgent.create() in new code."""
     return PortfolioDataAgent.create(
@@ -90,4 +115,6 @@ def create_portfolio_agent(
         portfolio_mcp_url=portfolio_mcp_url,
         user_token=user_token,
         mcp_auth_token=mcp_auth_token,
+        raw_token=raw_token,
+        settings=settings,
     )

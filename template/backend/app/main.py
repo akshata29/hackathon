@@ -21,7 +21,7 @@ load_dotenv()
 from app.config import get_settings
 from app.core.observability.setup import configure_observability
 from app.core.routes import health, sessions
-from app.routes import chat
+from app.routes import chat, github_auth
 # TODO: import your domain routes
 # from app.routes import domain
 
@@ -54,6 +54,7 @@ app.include_router(sessions.router, prefix="/api/sessions", tags=["sessions"])
 
 # ── Domain routes (add yours here) ─────────────────────────────────────────
 app.include_router(chat.router, prefix="/api/chat", tags=["chat"])
+app.include_router(github_auth.router, prefix="/api/auth", tags=["auth"])
 # TODO: mount your domain routes, e.g.:
 # app.include_router(domain.router, prefix="/api/domain", tags=["domain"])
 

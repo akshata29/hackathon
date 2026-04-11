@@ -5,7 +5,10 @@
 # CORE SERVICE — do not add domain-specific logic here.
 # ============================================================
 
+import base64
+import json
 import logging
+from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
 
@@ -17,6 +20,45 @@ from jose.utils import base64url_decode
 
 logger = logging.getLogger(__name__)
 security_scheme = HTTPBearer(auto_error=False)
+
+
+def _decode_claims_unsafe(token: str) -> dict[str, Any]:
+    """Base64-decode JWT payload without signature verification.
+
+    Used in dev mode only — never call this before signature validation in prod.
+    """
+    parts = token.split(".")
+    if len(parts) < 2:
+        return {}
+    padding = 4 - len(parts[1]) % 4
+    try:
+        return json.loads(base64.urlsafe_b64decode(parts[1] + "=" * padding))
+    except Exception:
+        return {}
+
+
+@dataclass
+class AuthContext:
+    """Holds the validated JWT claims and the raw Bearer token string.
+
+    ``user_id`` is a stable identifier suitable for:
+    - CosmosDB session partitioning
+    - Passing to orchestrators as ``user_token``
+    - OBO exchange (via the raw token) to downstream MCP servers
+
+    Preference order: preferred_username (email/UPN) > oid (object ID) > sub.
+    """
+    claims: dict[str, Any]
+    raw_token: str
+
+    @property
+    def user_id(self) -> str:
+        return (
+            self.claims.get("preferred_username")
+            or self.claims.get("oid")
+            or self.claims.get("sub")
+            or "anonymous"
+        )
 
 
 class EntraJWTValidator:
@@ -141,3 +183,48 @@ async def require_authenticated_user(
         return {"sub": "dev", "oid": "dev", "name": "Developer"}
     validator = get_validator(settings.entra_tenant_id, settings.entra_audience)
     return await validator.validate(credentials.credentials)
+
+
+async def require_auth_context(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Security(security_scheme),
+) -> AuthContext:
+    """Returns an AuthContext with both validated JWT claims and the raw Bearer token.
+
+    This is the preferred dependency for routes that need to:
+    - Identify the user (user_id / oid)
+    - Perform OBO token exchange for downstream MCP calls (raw_token)
+
+    Dev mode (ENTRA_TENANT_ID not set):
+        - No signature validation; claims are decoded unsafely for convenience.
+        - Falls back to a stable dev identity when no token is present.
+
+    Production (ENTRA_TENANT_ID set):
+        - Full JWKS signature validation; HTTP 401 on failure.
+        - raw_token is the as-received Bearer string passed to OBOAuth.
+    """
+    from app.config import get_settings
+    settings = get_settings()
+
+    if not credentials:
+        if settings.entra_tenant_id and settings.entra_audience:
+            raise HTTPException(status_code=401, detail="Authorization header required")
+        # Dev mode — no token present
+        return AuthContext(
+            claims={"sub": "dev", "oid": "dev", "preferred_username": "dev@localhost"},
+            raw_token="",
+        )
+
+    raw_token = credentials.credentials
+
+    if not settings.entra_tenant_id or not settings.entra_audience:
+        # Dev mode — decode without signature verification
+        logger.warning("Entra auth not configured; skipping token validation (DEV MODE)")
+        claims = _decode_claims_unsafe(raw_token)
+        if not claims:
+            claims = {"sub": "dev", "oid": "dev", "preferred_username": "dev@localhost"}
+        return AuthContext(claims=claims, raw_token=raw_token)
+
+    validator = get_validator(settings.entra_tenant_id, settings.entra_audience)
+    claims = await validator.validate(raw_token)
+    return AuthContext(claims=claims, raw_token=raw_token)

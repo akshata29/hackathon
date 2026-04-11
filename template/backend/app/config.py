@@ -52,6 +52,18 @@ class Settings(BaseSettings):
     entra_client_id: str = ""        # Frontend SPA app registration
     entra_backend_client_id: str = ""  # Backend API app registration
 
+    # OBO (On-Behalf-Of) token exchange settings
+    # entra_client_secret is used by the backend to perform OBO exchanges.
+    # Store the actual value in Key Vault; reference it here for local dev only.
+    entra_client_secret: str = ""    # api://<backend-client-id> credential
+
+    # Add one field per downstream MCP server your agents connect to.
+    # Each OBO-issued token will have the corresponding MCP client ID as
+    # its audience.  The scope name (e.g. "portfolio.read") is configured
+    # per-agent in your build_tools() call.
+    # Example:
+    #   my_mcp_client_id: str = ""   # api://<my-mcp-client-id>
+
     @property
     def entra_audience(self) -> str:
         """JWT audience = the backend API app registration client ID."""

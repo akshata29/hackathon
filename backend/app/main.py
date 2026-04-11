@@ -17,7 +17,7 @@ load_dotenv()
 from app.config import get_settings
 from app.core.observability.setup import configure_observability
 from app.core.routes import health, sessions
-from app.routes import chat, portfolio
+from app.routes import chat, portfolio, github_auth
 
 # Configure observability BEFORE creating routes
 # Reference: https://github.com/microsoft/agent-framework/tree/main/python/samples/02-agents/observability
@@ -48,6 +48,7 @@ app.include_router(health.router, tags=["health"])
 app.include_router(chat.router, prefix="/api/chat", tags=["chat"])
 app.include_router(portfolio.router, prefix="/api/portfolio", tags=["portfolio"])
 app.include_router(sessions.router, prefix="/api/sessions", tags=["sessions"])
+app.include_router(github_auth.router, prefix="/api/auth", tags=["auth"])
 
 
 @app.on_event("startup")

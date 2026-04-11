@@ -55,8 +55,18 @@ class Settings(BaseSettings):
 
     # Entra ID authentication
     entra_tenant_id: str = ""
-    entra_client_id: str = ""        # Frontend SPA app registration
-    entra_backend_client_id: str = ""  # Backend API app registration
+    entra_client_id: str = ""           # Frontend SPA app registration
+    entra_backend_client_id: str = ""   # Backend API app registration (JWT audience)
+
+    # OBO: backend exchanges the user's token for downstream MCP tokens.
+    # Store the client secret in Key Vault; read via ENTRA_CLIENT_SECRET env var.
+    # Leave empty in local dev — OBO is skipped and static MCP tokens are used.
+    entra_client_secret: str = ""
+
+    # MCP server app registration client IDs (audience for OBO-issued tokens).
+    # Set these after running scripts/post-provision.ps1 which creates the app regs.
+    portfolio_mcp_client_id: str = ""   # api://<id>/portfolio.read
+    yahoo_mcp_client_id: str = ""       # api://<id>/market.read
 
     @property
     def entra_audience(self) -> str:
@@ -89,6 +99,19 @@ class Settings(BaseSettings):
     # Set to the connection_id of your Bing resource in the Foundry project.
     # Leave empty to skip Bing grounding (market_intel_agent falls back to model knowledge).
     bing_connection_id: str = ""
+
+    # Frontend origin — used for post-OAuth redirects back to the SPA.
+    # In production set this to your Static Web App URL.
+    frontend_url: str = "http://localhost:5173"
+
+    # ── GitHub OAuth App  (Pattern 2: vendor OAuth per-user token) ────────────
+    # Create an OAuth App at: https://github.com/settings/developers
+    # Homepage URL:  <your frontend URL>
+    # Callback URL:  <backend URL>/api/auth/github/callback
+    # -------------------------------------------------------------------------
+    github_oauth_client_id: str = ""
+    github_oauth_client_secret: str = ""   # Store in Key Vault in production
+    github_oauth_redirect_uri: str = "http://localhost:8000/api/auth/github/callback"
 
 
 @lru_cache

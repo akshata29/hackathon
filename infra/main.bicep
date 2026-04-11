@@ -33,6 +33,15 @@ param foundryModelVersion string = '2024-11-20'
 @description('Capacity units for model deployment')
 param foundryModelCapacity int = 50
 
+@description('Entra app registration client ID for the backend API (JWT audience + OBO client)')
+param entraBackendClientId string = ''
+
+@description('Entra app registration client ID for the Portfolio MCP server')
+param portfolioMcpClientId string = ''
+
+@description('Entra app registration client ID for the Yahoo Finance MCP server')
+param yahooMcpClientId string = ''
+
 // --------------- Variables ---------------
 
 var abbrs = loadJsonContent('./abbreviations.json')
@@ -166,6 +175,11 @@ module containerApps './modules/containerapps.bicep' = {
     appInsightsConnectionString: appInsights.outputs.connectionString
     foundryProjectEndpoint: foundry.outputs.projectEndpoint
     foundryModelName: foundryModelName
+    entraTenantId: tenantId
+    entraBackendClientId: entraBackendClientId
+    portfolioMcpClientId: portfolioMcpClientId
+    yahooMcpClientId: yahooMcpClientId
+    entraClientSecretKvUri: kvSecrets.outputs.entraClientSecretUri
   }
 }
 
@@ -184,11 +198,12 @@ module staticWebApp './modules/staticwebapp.bicep' = {
 module kvSecrets './modules/keyvault-secrets.bicep' = {
   name: 'kv-secrets'
   scope: rg
-  dependsOn: [keyVault, containerApps]
+  dependsOn: [keyVault]
   params: {
     keyVaultName: keyVault.outputs.name
     mcpYahooApiKeyPlaceholder: 'REPLACE_WITH_YAHOO_MCP_KEY'
     mcpFredApiKeyPlaceholder: 'REPLACE_WITH_FRED_API_KEY'
+    entraBackendClientSecretPlaceholder: 'REPLACE_WITH_ENTRA_CLIENT_SECRET'
   }
 }
 
@@ -218,3 +233,7 @@ output FOUNDRY_MODEL string = foundryModelName
 
 output BACKEND_API_URL string = containerApps.outputs.backendUrl
 output FRONTEND_URL string = staticWebApp.outputs.url
+
+output ENTRA_BACKEND_CLIENT_ID string = entraBackendClientId
+output PORTFOLIO_MCP_CLIENT_ID string = portfolioMcpClientId
+output YAHOO_MCP_CLIENT_ID string = yahooMcpClientId

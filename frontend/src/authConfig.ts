@@ -25,11 +25,21 @@ export const msalConfig: Configuration = {
   },
 }
 
-// Scopes for sign-in (openid profile gives us the ID token / user info)
-// Chat.Read scope requires the API to be explicitly exposed in the app registration;
-// omit it here for local dev — the backend skips JWT validation when ENTRA_TENANT_ID is blank
+// Scopes for sign-in.
+// 'openid profile email' gives us the ID token and basic user info.
+// The backend API scope (Chat.Read) scopes the access token so the backend can
+// validate it as audience=ENTRA_BACKEND_CLIENT_ID and perform the OBO exchange
+// for downstream MCP servers.  Falls back gracefully when VITE_ENTRA_BACKEND_CLIENT_ID
+// is not set (local dev without Entra configured).
 export const loginRequest = {
-  scopes: ['openid', 'profile', 'email'],
+  scopes: [
+    'openid',
+    'profile',
+    'email',
+    ...(import.meta.env.VITE_ENTRA_BACKEND_CLIENT_ID
+      ? [`api://${import.meta.env.VITE_ENTRA_BACKEND_CLIENT_ID}/Chat.Read`]
+      : []),
+  ],
 }
 
 export const backendUrl =

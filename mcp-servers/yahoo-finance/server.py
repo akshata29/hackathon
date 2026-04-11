@@ -2,10 +2,10 @@
 # Yahoo Finance MCP Server
 # Exposes financial market data tools via MCP (Model Context Protocol)
 # Deployed as an internal Container App; accessed by the backend via
-# client.get_mcp_tool() using the Container App service URL.
+# MCPStreamableHTTPTool using the Container App service URL.
 #
-# Auth: Bearer token validation via X-Mcp-Auth header
-#       Token is a shared secret stored in Azure Key Vault
+# Auth: Entra ID JWT validation (production) / static token (dev)
+#       Token is OBO-issued by the backend; validated via JWKS here.
 # ============================================================
 
 import logging
@@ -14,19 +14,19 @@ from functools import lru_cache
 
 import yfinance as yf
 from fastmcp import FastMCP
-from fastmcp.server.auth import StaticTokenVerifier
-from starlette.requests import Request
 
-from keyvault import get_mcp_auth_token
+from entra_auth import EntraTokenVerifier, check_scope
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Auth provider — validates the shared bearer token set by the backend
+# Auth provider
 # ---------------------------------------------------------------------------
-_AUTH_TOKEN = get_mcp_auth_token()
-auth_provider = StaticTokenVerifier(tokens={_AUTH_TOKEN: {"sub": "backend-service", "client_id": "backend"}})
+# Production (ENTRA_TENANT_ID set): validates OBO JWT (audience=api://<MCP_CLIENT_ID>).
+# Dev mode: falls back to static MCP_AUTH_TOKEN comparison.
+# ---------------------------------------------------------------------------
+auth_provider = EntraTokenVerifier()
 
 mcp = FastMCP(
     name="yahoo-finance-mcp",
@@ -56,6 +56,7 @@ def get_quote(symbol: str) -> dict:
     Returns:
         dict with price, change, change_pct, volume, market_cap, pe_ratio, week_52_high, week_52_low
     """
+    check_scope("market.read")
     symbol = symbol.upper().strip()
     try:
         ticker = yf.Ticker(symbol)
@@ -91,6 +92,7 @@ def get_financials(symbol: str) -> dict:
         dict with pe_ratio, forward_pe, peg_ratio, price_to_book, revenue_growth,
         earnings_growth, return_on_equity, debt_to_equity, free_cash_flow_yield
     """
+    check_scope("market.read")
     symbol = symbol.upper().strip()
     try:
         info = yf.Ticker(symbol).info
@@ -130,6 +132,7 @@ def get_news(symbol: str, max_items: int = 5) -> list[dict]:
     Returns:
         list of dicts with title, publisher, link, published_at
     """
+    check_scope("market.read")
     symbol = symbol.upper().strip()
     max_items = min(max(1, max_items), 10)
     try:
@@ -162,6 +165,7 @@ def get_analyst_ratings(symbol: str) -> dict:
     Returns:
         dict with recommendation, number_of_analysts, mean_target_price, high_target, low_target
     """
+    check_scope("market.read")
     symbol = symbol.upper().strip()
     try:
         info = yf.Ticker(symbol).info
@@ -193,6 +197,7 @@ def compare_stocks(symbols: list[str], metric: str = "pe_ratio") -> list[dict]:
     Returns:
         Sorted list of dicts with symbol and metric value
     """
+    check_scope("market.read")
     symbols = [s.upper().strip() for s in symbols[:5]]
     metric_map = {
         "pe_ratio": "trailingPE",

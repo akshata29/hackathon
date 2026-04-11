@@ -61,6 +61,18 @@ const PROMPT_GROUPS = [
     ],
   },
   {
+    label: 'GitHub Intelligence',
+    badge: 'GitHub MCP (connect)',
+    color: 'text-teal-400',
+    border: 'border-teal-900/60',
+    requiresAuth: true,
+    prompts: [
+      'How active is Microsoft\'s engineering on GitHub? Analyze MSFT commit velocity',
+      'Compare open-source health of Meta vs Google — which shows stronger dev momentum?',
+      'What is the release cadence and issue backlog for NVIDIA\'s CUDA repos?',
+    ],
+  },
+  {
     label: 'Handoff Routing',
     badge: 'triage -> specialist',
     color: 'text-yellow-400',

@@ -54,7 +54,64 @@ class AgentA(BaseAgent):
 
             return [FunctionTool(name="my_lookup", description=my_lookup.__doc__ or "", func=my_lookup)]
 
-        Option b — MCPStreamableHTTPTool (connects to your private MCP server):
+        Option c -- MCPStreamableHTTPTool with VENDOR OAuth token (external MCP, Pattern 2):
+            # Used for external vendor MCPs (GitHub, Salesforce, etc.) that have their
+            # own OAuth identity system and cannot accept Entra OBO tokens.
+            #
+            # The token is obtained once via OAuth2 Authorization Code flow and stored
+            # per-user in VendorOAuthStore (Cosmos DB). At agent call time the workflow
+            # pre-fetches it and passes it here.
+            #
+            # See: app/core/auth/vendor_oauth_store.py
+            #      app/routes/github_auth.py  (reference implementation)
+            #      backend/app/agents/github_intel.py (reference implementation)
+            import httpx
+            from agent_framework import MCPStreamableHTTPTool
+
+            vendor_token = kwargs.get("vendor_token")   # per-user OAuth token from VendorOAuthStore
+            vendor_mcp_url = kwargs.get("vendor_mcp_url", "https://vendor.example.com/mcp/")
+
+            if vendor_token:
+                http_client = httpx.AsyncClient(
+                    headers={"Authorization": f"Bearer {vendor_token}"},
+                    timeout=30,
+                )
+                return [MCPStreamableHTTPTool(url=vendor_mcp_url, http_client=http_client)]
+
+            # No token -- user hasn't authorized; return a guidance FunctionTool
+            from agent_framework import FunctionTool
+
+            async def not_connected(query: str) -> str:
+                """Look up data from <vendor>."""
+                return "<Vendor> is not connected. Visit /api/auth/<vendor> to connect."
+
+            return [FunctionTool(name="vendor_lookup", description=not_connected.__doc__ or "", func=not_connected)]
+            import httpx
+            from agent_framework import MCPStreamableHTTPTool
+            from app.core.auth.obo import build_obo_http_client
+
+            # kwargs must include: mcp_url, raw_token, mcp_auth_token (dev fallback), settings
+            mcp_url      = kwargs["mcp_url"]
+            raw_token    = kwargs.get("raw_token")
+            fallback_tok = kwargs.get("mcp_auth_token", "dev-my-mcp-token")
+            settings     = kwargs.get("settings")
+
+            # Production: OBO exchange --> MCP receives a user-bound token
+            # Dev mode:   plain Bearer fallback (when ENTRA_CLIENT_SECRET not set)
+            http_client = build_obo_http_client(
+                settings=settings,
+                raw_token=raw_token,
+                mcp_client_id=settings.my_mcp_client_id if settings else "",
+                scope_name="my-scope.read",
+                fallback_bearer=fallback_tok,
+            ) if settings else httpx.AsyncClient(
+                headers={"Authorization": f"Bearer {fallback_tok}"}
+            )
+
+            return [MCPStreamableHTTPTool(
+                url=mcp_url,
+                http_client=http_client,
+            )]
             import httpx
             from agent_framework import MCPStreamableHTTPTool
 

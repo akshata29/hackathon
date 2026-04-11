@@ -131,6 +131,34 @@ resource sessionsContainerRes 'Microsoft.DocumentDB/databaseAccounts/sqlDatabase
   }
 }
 
+// Vendor OAuth tokens — per-user third-party OAuth tokens (Pattern 2)
+// e.g. GitHub personal access tokens stored after the OAuth Authorization Code flow
+// Partitioned by user_oid for efficient per-user lookups
+var vendorOAuthContainer = 'vendor-oauth-tokens'
+
+resource vendorOAuthContainerRes 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/containers@2024-05-15' = {
+  name: vendorOAuthContainer
+  parent: database
+  properties: {
+    resource: {
+      id: vendorOAuthContainer
+      partitionKey: {
+        paths: ['/user_oid']
+        kind: 'Hash'
+        version: 2
+      }
+      indexingPolicy: {
+        indexingMode: 'consistent'
+        automatic: true
+        includedPaths: [
+          { path: '/*' }
+        ]
+      }
+      // No TTL — tokens are explicitly revoked; long-lived by design
+    }
+  }
+}
+
 // Grant Managed Identity data access via RBAC (no connection strings)
 resource cosmosRoleAssignment 'Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments@2024-05-15' = {
   name: guid(cosmosAccount.id, managedIdentityPrincipalId, cosmosDataContributorRole)

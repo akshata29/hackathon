@@ -17,16 +17,22 @@ import os
 import sqlite3
 
 from fastmcp import FastMCP
-from fastmcp.server.auth import StaticTokenVerifier
+
+from entra_auth import EntraTokenVerifier, check_scope, get_user_id_from_request
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Auth — shared bearer token validated by FastMCP
+# Auth provider
 # ---------------------------------------------------------------------------
-_AUTH_TOKEN = os.getenv("MCP_AUTH_TOKEN", "dev-portfolio-mcp-token")
-auth_provider = StaticTokenVerifier(tokens={_AUTH_TOKEN: {"sub": "backend-service", "client_id": "backend"}})
+# Production (ENTRA_TENANT_ID set): EntraTokenVerifier validates the OBO JWT
+# against Entra JWKS; audience = api://<MCP_CLIENT_ID>.
+#
+# Dev mode (ENTRA_TENANT_ID not set): falls back to static MCP_AUTH_TOKEN
+# comparison inside EntraTokenVerifier.verify_token().
+# ---------------------------------------------------------------------------
+auth_provider = EntraTokenVerifier()
 
 mcp = FastMCP(
     name="portfolio-db-mcp",
@@ -34,7 +40,7 @@ mcp = FastMCP(
         "You have access to CONFIDENTIAL portfolio data for the authenticated user. "
         "This includes holdings, transactions, performance, and asset allocation. "
         "Data classification: CONFIDENTIAL. "
-        "NEVER return data belonging to a user other than the one specified in X-User-Id. "
+        "NEVER return data belonging to a user other than the one authenticated via the Bearer token. "
         "NEVER include PII in responses beyond what the user already provided."
     ),
     auth=auth_provider,
@@ -191,20 +197,13 @@ _PORTFOLIOS: dict[str, dict] = {
 
 
 def _get_user_id_from_context() -> str:
+    """Return the authenticated user's identity for row-level security.
+
+    Production: extracts oid from the OBO token (cryptographically verified by
+    EntraTokenVerifier before this tool function was invoked).
+    Dev mode: reads X-User-Id header for backward compatibility.
     """
-    Extract user ID from MCP request context headers.
-    FastMCP exposes request headers via context; falls back to 'dev'.
-    """
-    try:
-        from fastmcp.server.context import get_http_request
-        req = get_http_request()
-        if req:
-            user_id = req.headers.get("x-user-id", "").strip()
-            if user_id:
-                return user_id
-    except Exception:
-        pass
-    return "dev"
+    return get_user_id_from_request()
 
 
 def _get_portfolio(user_id: str) -> dict:
@@ -246,6 +245,7 @@ def get_holdings() -> dict:
         dict with list of holdings (symbol, name, sector, shares, current_price,
         market_value, unrealized_pnl, unrealized_pnl_pct, weight_pct) and total_value
     """
+    check_scope("portfolio.read")
     user_id = _get_user_id_from_context()
     logger.info("get_holdings called for user: %s", user_id)
     portfolio = _get_portfolio(user_id)
@@ -265,6 +265,7 @@ def get_allocation() -> dict:
     Returns:
         dict with sector_allocation list (sector, weight_pct) and total_value
     """
+    check_scope("portfolio.read")
     user_id = _get_user_id_from_context()
     portfolio = _get_portfolio(user_id)
     return {
@@ -284,6 +285,7 @@ def get_performance_summary() -> dict:
         max_drawdown, and similar metrics
     """
     import random
+    check_scope("portfolio.read")
     user_id = _get_user_id_from_context()
     portfolio = _get_portfolio(user_id)
 
@@ -325,6 +327,7 @@ def get_transactions(symbol: str = "", limit: int = 20) -> dict:
         dict with transactions list, each entry has symbol, trade_date, trade_type,
         shares, price, total_amount
     """
+    check_scope("portfolio.read")
     user_id = _get_user_id_from_context()
     limit = min(max(1, limit), 100)
     rows = _db_get_transactions(user_id, symbol or None, limit)
@@ -362,6 +365,7 @@ def get_holding_detail(symbol: str) -> dict:
     Returns:
         dict with full holding details or error if symbol not held
     """
+    check_scope("portfolio.read")
     user_id = _get_user_id_from_context()
     symbol = symbol.upper().strip()
     portfolio = _get_portfolio(user_id)
@@ -382,6 +386,7 @@ def get_rebalancing_suggestions(target_tech_weight: float = 30.0) -> dict:
     Returns:
         dict with current vs target allocations and suggested trades
     """
+    check_scope("portfolio.read")
     user_id = _get_user_id_from_context()
     portfolio = _get_portfolio(user_id)
     current_tech = sum(

@@ -1,5 +1,6 @@
+import { useEffect, useState } from 'react'
 import { useMsal, useIsAuthenticated } from '@azure/msal-react'
-import { loginRequest } from '../authConfig'
+import { loginRequest, backendUrl } from '../authConfig'
 
 type Tab = 'chat' | 'dashboard'
 
@@ -12,6 +13,69 @@ export function NavBar({ activeTab, onTabChange }: NavBarProps) {
   const { instance, accounts } = useMsal()
   const isAuthenticated = useIsAuthenticated()
   const user = accounts[0]
+  const [githubConnected, setGithubConnected] = useState<boolean | null>(null)
+
+  // Check GitHub connection status when signed in
+  useEffect(() => {
+    if (!isAuthenticated) { setGithubConnected(null); return }
+    // Check for post-OAuth redirect indicator
+    const params = new URLSearchParams(window.location.search)
+    if (params.get('github_connected') === 'true') {
+      setGithubConnected(true)
+      window.history.replaceState({}, '', window.location.pathname)
+      return
+    }
+    // Poll status from backend
+    const check = async () => {
+      try {
+        const { instance: msalInstance } = { instance }
+        const result = await msalInstance.acquireTokenSilent({ ...loginRequest, account: accounts[0] })
+        const res = await fetch(`${backendUrl}/api/auth/github/status`, {
+          headers: { Authorization: `Bearer ${result.accessToken}` },
+        })
+        if (res.ok) {
+          const data = await res.json()
+          setGithubConnected(data.connected)
+        }
+      } catch {
+        setGithubConnected(false)
+      }
+    }
+    check()
+  }, [isAuthenticated])
+
+  const handleGitHubConnect = async () => {
+    if (!accounts[0]) return
+    try {
+      const result = await instance.acquireTokenSilent({ ...loginRequest, account: accounts[0] })
+      // Backend returns JSON {"auth_url": "..."} — navigate directly to avoid
+      // browser opaque-redirect issues with fetch(redirect:'manual')
+      const res = await fetch(`${backendUrl}/api/auth/github`, {
+        headers: { Authorization: `Bearer ${result.accessToken}` },
+      })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = await res.json()
+      if (data.auth_url) {
+        window.location.href = data.auth_url
+      }
+    } catch {
+      instance.loginPopup(loginRequest).catch(console.error)
+    }
+  }
+
+  const handleGitHubDisconnect = async () => {
+    if (!accounts[0]) return
+    try {
+      const result = await instance.acquireTokenSilent({ ...loginRequest, account: accounts[0] })
+      await fetch(`${backendUrl}/api/auth/github`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${result.accessToken}` },
+      })
+      setGithubConnected(false)
+    } catch (e) {
+      console.error('GitHub disconnect failed', e)
+    }
+  }
 
   const handleLogin = () => instance.loginPopup(loginRequest).catch(console.error)
   const handleLogout = () => instance.logoutPopup().catch(console.error)
@@ -42,6 +106,31 @@ export function NavBar({ activeTab, onTabChange }: NavBarProps) {
         <div className="flex items-center gap-3">
           {isAuthenticated ? (
             <>
+              {/* GitHub connection indicator (Pattern 2: vendor OAuth) */}
+              {githubConnected === false && (
+                <button
+                  onClick={handleGitHubConnect}
+                  title="Connect GitHub for engineering intelligence on tech stocks"
+                  className="flex items-center gap-1.5 text-xs text-gray-400 hover:text-white border border-gray-700/60 rounded-md px-2.5 py-1 hover:border-gray-500 transition-all"
+                >
+                  <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="currentColor">
+                    <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
+                  </svg>
+                  Connect GitHub
+                </button>
+              )}
+              {githubConnected === true && (
+                <button
+                  onClick={handleGitHubDisconnect}
+                  title="GitHub connected - click to disconnect"
+                  className="flex items-center gap-1.5 text-xs text-emerald-400 border border-emerald-800/60 rounded-md px-2.5 py-1 hover:text-red-400 hover:border-red-800/60 transition-all"
+                >
+                  <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="currentColor">
+                    <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
+                  </svg>
+                  GitHub
+                </button>
+              )}
               <div className="flex items-center gap-2">
                 <span className="w-6 h-6 rounded-full bg-indigo-600 flex items-center justify-center text-[10px] font-bold text-white uppercase">
                   {(user?.name || user?.username || '?')[0]}

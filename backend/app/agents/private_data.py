@@ -56,31 +56,43 @@ class PrivateDataAgent(BaseAgent):
         cls,
         yahoo_mcp_url: str,
         mcp_auth_token: str | None = None,
+        raw_token: str | None = None,
+        settings=None,
         **kwargs,
     ) -> list:
         """
         Build the Yahoo Finance MCP tool.
 
-        The Yahoo Finance MCP is a private internal service — not publicly accessible.
-        Authentication uses a machine-to-machine bearer token.
+        Security (production): OBOAuth exchanges the user's token for an OBO token
+        scoped to api://<yahoo_mcp_client_id>/market.read.  The Yahoo Finance MCP
+        validates via JWKS and checks the scope before serving any tool call.
 
-        Design rationale: private MCP = controlled data boundary.  The MCP server
-        can add rate limiting, audit logging, and PII scrubbing before data reaches
-        the agent.  This is the "secure MCP" pattern.
+        Security (dev mode): plain bearer with static MCP_AUTH_TOKEN.
+
+        Note: Yahoo Finance serves public market data so there is no per-user RLS;
+        the OBO token still enforces that only authorized backends can call the MCP
+        and provides an audit trail of which user triggered the request.
         """
         import httpx
         from agent_framework import MCPStreamableHTTPTool
+        from app.core.auth.obo import build_obo_http_client
 
-        http_headers = {}
-        if mcp_auth_token:
-            http_headers["Authorization"] = f"Bearer {mcp_auth_token}"
+        mcp_client_id = getattr(settings, "yahoo_mcp_client_id", "") if settings else ""
+
+        http_client = build_obo_http_client(
+            settings=settings,
+            raw_token=raw_token,
+            mcp_client_id=mcp_client_id,
+            scope_name="market.read",
+            fallback_bearer=mcp_auth_token or "",
+        )
 
         return [
             MCPStreamableHTTPTool(
                 name="YahooFinanceData",
                 url=f"{yahoo_mcp_url}/mcp",
                 approval_mode="never_require",
-                http_client=httpx.AsyncClient(headers=http_headers),
+                http_client=http_client,
             )
         ]
 
@@ -89,10 +101,14 @@ def create_private_data_agent(
     client,
     yahoo_mcp_url: str,
     mcp_auth_token: str | None = None,
+    raw_token: str | None = None,
+    settings=None,
 ):
     """Backward-compat factory — prefer PrivateDataAgent.create() in new code."""
     return PrivateDataAgent.create(
         client,
         yahoo_mcp_url=yahoo_mcp_url,
         mcp_auth_token=mcp_auth_token,
+        raw_token=raw_token,
+        settings=settings,
     )

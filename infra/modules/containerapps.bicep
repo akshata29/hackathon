@@ -21,6 +21,16 @@ param appInsightsConnectionString string
 param foundryProjectEndpoint string
 param foundryModelName string
 
+// Entra ID / OBO configuration
+// These are set post-provisioning by scripts/post-provision.ps1 which creates
+// the three app registrations (frontend, backend-api, portfolio-mcp, yahoo-mcp).
+param entraTenantId string = ''
+param entraBackendClientId string = ''
+param portfolioMcpClientId string = ''
+param yahooMcpClientId string = ''
+// Key Vault URI for the backend client secret (used for OBO exchange)
+param entraClientSecretKvUri string = ''
+
 var backendAppName = 'ca-backend-${resourceToken}'
 var yahooMcpAppName = 'ca-mcp-yahoo-${resourceToken}'
 var portfolioMcpAppName = 'ca-mcp-portfolio-${resourceToken}'
@@ -84,6 +94,15 @@ resource yahooMcpApp 'Microsoft.App/containerApps@2024-03-01' = {
               name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
               value: appInsightsConnectionString
             }
+            // Entra JWT validation — validates OBO tokens from the backend
+            {
+              name: 'ENTRA_TENANT_ID'
+              value: entraTenantId
+            }
+            {
+              name: 'MCP_CLIENT_ID'
+              value: yahooMcpClientId
+            }
           ]
         }
       ]
@@ -142,6 +161,15 @@ resource portfolioMcpApp 'Microsoft.App/containerApps@2024-03-01' = {
               name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
               value: appInsightsConnectionString
             }
+            // Entra JWT validation — validates OBO tokens from the backend
+            {
+              name: 'ENTRA_TENANT_ID'
+              value: entraTenantId
+            }
+            {
+              name: 'MCP_CLIENT_ID'
+              value: portfolioMcpClientId
+            }
           ]
         }
       ]
@@ -187,6 +215,13 @@ resource backendApp 'Microsoft.App/containerApps@2024-03-01' = {
           identity: managedIdentityId
         }
       ]
+      secrets: entraClientSecretKvUri != '' ? [
+        {
+          name: 'entra-backend-client-secret'
+          keyVaultUrl: entraClientSecretKvUri
+          identity: managedIdentityId
+        }
+      ] : []
     }
     template: {
       containers: [
@@ -237,6 +272,29 @@ resource backendApp 'Microsoft.App/containerApps@2024-03-01' = {
             {
               name: 'ENABLE_INSTRUMENTATION'
               value: 'true'
+            }
+            // Entra ID: backend API app registration (JWT audience + OBO client)
+            {
+              name: 'ENTRA_TENANT_ID'
+              value: entraTenantId
+            }
+            {
+              name: 'ENTRA_BACKEND_CLIENT_ID'
+              value: entraBackendClientId
+            }
+            // OBO: client secret read from Key Vault via Container Apps secret ref
+            {
+              name: 'ENTRA_CLIENT_SECRET'
+              secretRef: 'entra-backend-client-secret'
+            }
+            // MCP app registration IDs (audience for OBO-issued tokens)
+            {
+              name: 'PORTFOLIO_MCP_CLIENT_ID'
+              value: portfolioMcpClientId
+            }
+            {
+              name: 'YAHOO_MCP_CLIENT_ID'
+              value: yahooMcpClientId
             }
             {
               name: 'YAHOO_MCP_URL'

@@ -12,11 +12,12 @@ import json
 import logging
 import uuid
 
-from fastapi import APIRouter, Depends, Header, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.config import Settings, get_settings
+from app.core.auth.middleware import AuthContext, require_auth_context
 from app.core.conversation.cosmos_session_store import CosmosSessionStore
 from app.core.guardrails.policy import check_user_message
 from app.workflows.portfolio_workflow import PortfolioOrchestrator
@@ -37,58 +38,21 @@ class ChatResponse(BaseModel):
     agent: str
 
 
-def _get_user_id(authorization: str | None = Header(default=None)) -> str:
-    """
-    Extract user ID from the Entra Bearer token.
-
-    In production this performs JWT validation against Entra JWKS endpoint.
-    For development, falls back to anonymous user.
-
-    Security: This user ID is propagated to the Portfolio MCP server for
-    row-level security enforcement.
-    """
-    if not authorization or not authorization.startswith("Bearer "):
-        # Development / anonymous mode — never allow this in production for financial data
-        logger.warning(
-            "No Bearer token provided — using anonymous user. "
-            "Configure ENTRA_CLIENT_ID for production auth."
-        )
-        return "anonymous"
-
-    token = authorization.removeprefix("Bearer ")
-    # In production: validate JWT against Entra JWKS endpoint
-    # For hackathon scope: extract sub claim without full validation
-    try:
-        import base64
-
-        parts = token.split(".")
-        if len(parts) >= 2:
-            payload_b64 = parts[1] + "=="  # add padding
-            payload = json.loads(base64.urlsafe_b64decode(payload_b64))
-            # preferred_username is the email/UPN — use it as user_id so it
-            # matches the email-keyed rows in the local SQLite portfolio DB.
-            return (
-                payload.get("preferred_username")
-                or payload.get("oid")
-                or payload.get("sub")
-                or "anonymous"
-            )
-    except Exception:
-        pass
-    return "anonymous"
-
 
 @router.post("/message")
 async def chat_message(
     request: ChatRequest,
     settings: Settings = Depends(get_settings),
-    user_id: str = Depends(_get_user_id),
+    auth: AuthContext = Depends(require_auth_context),
 ):
     """
     Single-turn chat endpoint.
     Returns Server-Sent Events (SSE) stream for progressive rendering.
     Messages are persisted to CosmosDB for per-user session history.
     """
+    user_id = auth.user_id
+    raw_token = auth.raw_token
+
     policy = check_user_message(request.message)
     if not policy.allowed:
         raise HTTPException(status_code=400, detail=policy.reason)
@@ -130,6 +94,7 @@ async def chat_message(
                         message=request.message,
                         session_id=session_id,
                         user_token=user_id,
+                        raw_token=raw_token,
                         history=prior_messages or None,
                     )
                 else:
@@ -137,6 +102,7 @@ async def chat_message(
                         message=request.message,
                         session_id=session_id,
                         user_token=user_id,
+                        raw_token=raw_token,
                         history=prior_messages or None,
                     )
 
@@ -198,11 +164,22 @@ async def chat_websocket(
     await websocket.accept()
     logger.info("WebSocket connected for session: %s", session_id)
 
-    # Extract user ID from WebSocket header (sent by React client)
+    # Extract user identity from WebSocket Authorization header.
+    # Full JWKS validation is not available on the WebSocket handshake path;
+    # we decode claims for user_id and keep the raw token for OBO exchange.
+    from app.core.auth.middleware import _decode_claims_unsafe
     user_id = "anonymous"
+    raw_token = ""
     auth_header = websocket.headers.get("authorization", "")
     if auth_header.startswith("Bearer "):
-        user_id = _get_user_id(auth_header)
+        raw_token = auth_header.removeprefix("Bearer ")
+        claims = _decode_claims_unsafe(raw_token)
+        user_id = (
+            claims.get("preferred_username")
+            or claims.get("oid")
+            or claims.get("sub")
+            or "anonymous"
+        )
 
     try:
         while True:
@@ -224,12 +201,14 @@ async def chat_websocket(
                         message=message,
                         session_id=session_id,
                         user_token=user_id,
+                        raw_token=raw_token,
                     )
                 else:
                     gen = orchestrator.run_handoff(
                         message=message,
                         session_id=session_id,
                         user_token=user_id,
+                        raw_token=raw_token,
                     )
 
                 async for event in gen:

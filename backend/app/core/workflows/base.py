@@ -188,17 +188,23 @@ class BaseOrchestrator(ABC):
         )
 
     @abstractmethod
-    def build_specialist_agents(self, user_token: str | None = None) -> list:
+    def build_specialist_agents(self, user_token: str | None = None, raw_token: str | None = None) -> list:
         """Return the ordered list of specialist agents.
 
         These are appended after the triage agent in HandoffBuilder participants,
         and used directly as ConcurrentBuilder participants.
+
+        Args:
+            user_token: Stable user identifier (email / oid) for session scoping
+                        and dev-mode RLS headers.
+            raw_token:  The user's raw Entra Bearer string.  Present in production
+                        when OBO exchange should be used instead of shared secrets.
         """
         ...
 
-    def build_concurrent_agents(self, user_token: str | None = None) -> list:
+    def build_concurrent_agents(self, user_token: str | None = None, raw_token: str | None = None) -> list:
         """Agents used for ConcurrentBuilder — defaults to build_specialist_agents()."""
-        return self.build_specialist_agents(user_token)
+        return self.build_specialist_agents(user_token, raw_token)
 
     def build_synthesis_agent(self):
         """Build the synthesis agent that aggregates concurrent specialist results.
@@ -220,12 +226,8 @@ class BaseOrchestrator(ABC):
     # Workflow builders (concrete — subclasses should not need to override)
     # ------------------------------------------------------------------
 
-    def _build_handoff_workflow(self, user_token: str | None = None):
-        """Wire up a HandoffBuilder: triage agent + all specialist agents.
-
-        The triage agent receives the user message first and routes to the
-        appropriate specialist via a handoff tool call.
-        """
+    def _build_handoff_workflow(self, user_token: str | None = None, raw_token: str | None = None):
+        """Wire up a HandoffBuilder: triage agent + all specialist agents."""
         from agent_framework.orchestrations import HandoffBuilder
 
         compaction = self._get_compaction_provider()
@@ -234,7 +236,7 @@ class BaseOrchestrator(ABC):
             providers.append(self._search_provider)
 
         triage = self.build_triage_agent(context_providers=providers or None)
-        specialists = self.build_specialist_agents(user_token)
+        specialists = self.build_specialist_agents(user_token, raw_token)
 
         return (
             HandoffBuilder(
@@ -245,13 +247,13 @@ class BaseOrchestrator(ABC):
             .build()
         )
 
-    def _build_concurrent_workflow(self, user_token: str | None = None):
+    def _build_concurrent_workflow(self, user_token: str | None = None, raw_token: str | None = None):
         """Wire up a ConcurrentBuilder: all specialist agents run in parallel,
         then a synthesis agent aggregates the results.
         """
         from agent_framework.orchestrations import ConcurrentBuilder
 
-        specialists = self.build_concurrent_agents(user_token)
+        specialists = self.build_concurrent_agents(user_token, raw_token)
         synthesis = self.build_synthesis_agent()
 
         async def _synthesize(results):
@@ -301,15 +303,15 @@ class BaseOrchestrator(ABC):
         session_id: str,
         user_token: str | None = None,
         history: list[dict] | None = None,
+        raw_token: str | None = None,
     ) -> AsyncIterator[dict]:
         """Stream events from the handoff workflow.
 
-        Triage tokens are buffered until either a handoff event is observed
-        (specialist taking over) or the workflow ends.  If
-        ``comprehensive_trigger`` is non-empty and appears in the accumulated
-        triage text, escalate to ``run_comprehensive()``.
+        Args:
+            user_token: Stable user identifier (email/oid) for session + dev RLS.
+            raw_token:  Raw Entra Bearer string for OBO exchange to downstream MCPs.
         """
-        workflow = self._build_handoff_workflow(user_token=user_token)
+        workflow = self._build_handoff_workflow(user_token=user_token, raw_token=raw_token)
 
         # Buffer triage tokens so we can inspect for the comprehensive trigger
         # without prematurely emitting partial text to the client.
@@ -347,7 +349,7 @@ class BaseOrchestrator(ABC):
         if self.comprehensive_trigger and self.comprehensive_trigger in triage_text:
             logger.info("Triage triggered comprehensive analysis")
             yield {"type": "status", "state": "comprehensive_analysis"}
-            async for event in self.run_comprehensive(message, session_id, user_token, history):
+            async for event in self.run_comprehensive(message, session_id, user_token, history=history, raw_token=raw_token):
                 yield event
         else:
             for buffered in triage_buffer:
@@ -359,9 +361,10 @@ class BaseOrchestrator(ABC):
         session_id: str,
         user_token: str | None = None,
         history: list[dict] | None = None,
+        raw_token: str | None = None,
     ) -> AsyncIterator[dict]:
         """Stream events from the concurrent (all-agents-parallel) workflow."""
-        workflow = self._build_concurrent_workflow(user_token=user_token)
+        workflow = self._build_concurrent_workflow(user_token=user_token, raw_token=raw_token)
         run_input = self._build_run_input(message, history)
         try:
             async for event in workflow.run(run_input, stream=True):

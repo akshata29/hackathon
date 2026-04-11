@@ -15,11 +15,12 @@ import json
 import logging
 import uuid
 
-from fastapi import APIRouter, Depends, Header, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.config import Settings, get_settings
+from app.core.auth.middleware import AuthContext, require_auth_context
 from app.core.conversation.cosmos_session_store import CosmosSessionStore
 from app.core.guardrails.policy import check_user_message
 
@@ -106,12 +107,22 @@ async def chat_message(
 
         try:
             async with AppOrchestrator(settings) as orchestrator:
-                gen = orchestrator.run_handoff(
-                    message=request.message,
-                    session_id=session_id,
-                    user_token=user_id,
-                    history=prior_messages or None,
-                )
+                if request.mode == "comprehensive":
+                    gen = orchestrator.run_comprehensive(
+                        message=request.message,
+                        session_id=session_id,
+                        user_token=user_id,
+                        raw_token=raw_token,
+                        history=prior_messages or None,
+                    )
+                else:
+                    gen = orchestrator.run_handoff(
+                        message=request.message,
+                        session_id=session_id,
+                        user_token=user_id,
+                        raw_token=raw_token,
+                        history=prior_messages or None,
+                    )
 
                 async for event in gen:
                     if event.get("type") == "agent_response" and event.get("content"):
@@ -156,9 +167,18 @@ async def chat_websocket(
     """WebSocket for persistent multi-turn chat sessions."""
     await websocket.accept()
     user_id = "anonymous"
+    raw_token = ""
     auth_header = websocket.headers.get("authorization", "")
     if auth_header.startswith("Bearer "):
-        user_id = _get_user_id(auth_header)
+        from app.core.auth.middleware import _decode_claims_unsafe
+        raw_token = auth_header.removeprefix("Bearer ")
+        claims = _decode_claims_unsafe(raw_token)
+        user_id = (
+            claims.get("preferred_username")
+            or claims.get("oid")
+            or claims.get("sub")
+            or "anonymous"
+        )
 
     try:
         while True:
@@ -174,11 +194,20 @@ async def chat_websocket(
                 continue
 
             async with AppOrchestrator(settings) as orchestrator:
-                gen = orchestrator.run_handoff(
-                    message=message,
-                    session_id=session_id,
-                    user_id=user_id,
-                )
+                if mode == "comprehensive":
+                    gen = orchestrator.run_comprehensive(
+                        message=message,
+                        session_id=session_id,
+                        user_token=user_id,
+                        raw_token=raw_token,
+                    )
+                else:
+                    gen = orchestrator.run_handoff(
+                        message=message,
+                        session_id=session_id,
+                        user_token=user_id,
+                        raw_token=raw_token,
+                    )
                 async for event in gen:
                     await websocket.send_text(json.dumps(event))
 
