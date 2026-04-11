@@ -17,7 +17,8 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.config import Settings, get_settings
-from app.conversation.cosmos_session_store import CosmosSessionStore
+from app.core.conversation.cosmos_session_store import CosmosSessionStore
+from app.core.guardrails.policy import check_user_message
 from app.workflows.portfolio_workflow import PortfolioOrchestrator
 
 logger = logging.getLogger(__name__)
@@ -88,6 +89,10 @@ async def chat_message(
     Returns Server-Sent Events (SSE) stream for progressive rendering.
     Messages are persisted to CosmosDB for per-user session history.
     """
+    policy = check_user_message(request.message)
+    if not policy.allowed:
+        raise HTTPException(status_code=400, detail=policy.reason)
+
     session_id = request.session_id or str(uuid.uuid4())
     title = request.message[:80] + ("..." if len(request.message) > 80 else "")
 
@@ -96,11 +101,15 @@ async def chat_message(
     is_authenticated = user_id != "anonymous"
     store = CosmosSessionStore(settings) if is_authenticated else None
 
+    # Load prior messages for conversation history before appending the new user message
+    prior_messages: list[dict] = []
     if store:
         try:
             await store.initialize()
             existing = await store.get_session(session_id, user_id)
-            if not existing:
+            if existing:
+                prior_messages = existing.get("messages", [])
+            else:
                 await store.create_session(session_id, user_id, title)
             await store.append_message(session_id, user_id, "user", request.message)
         except Exception as exc:
@@ -121,12 +130,14 @@ async def chat_message(
                         message=request.message,
                         session_id=session_id,
                         user_token=user_id,
+                        history=prior_messages or None,
                     )
                 else:
                     gen = orchestrator.run_handoff(
                         message=request.message,
                         session_id=session_id,
                         user_token=user_id,
+                        history=prior_messages or None,
                     )
 
                 async for event in gen:

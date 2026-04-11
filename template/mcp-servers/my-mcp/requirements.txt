@@ -1,0 +1,7 @@
+fastmcp>=2.0.0
+uvicorn[standard]>=0.32.0
+httpx>=0.28.0
+azure-keyvault-secrets>=4.9.0
+azure-identity>=1.21.0
+# TODO: add data-access libraries your MCP server needs
+# e.g. pyodbc, pymongo, pymysql, aiohttp, pandas, etc.

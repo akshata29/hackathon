@@ -1,97 +1,225 @@
-# Workshop Module 03: HandoffBuilder Orchestration
+# Workshop Module 03: Define Your Use-Case & Configure
 
-## Learning Objectives
-- Understand intent-based routing with HandoffBuilder
-- Configure a triage agent and specialist agents
-- Test agent routing with different query types
-- Inspect handoff trace events in the UI
+## Objective
 
-## HandoffBuilder Pattern
+Start building your own application. In this module you will:
 
-HandoffBuilder creates a **stateful multi-agent workflow** where a triage agent analyses user intent and delegates to the appropriate specialist. Each agent can hand back to triage or to another agent.
+1. Copy the clean template into your working directory
+2. Decide your use-case and agents
+3. Run **Coding Prompt Step 1** through GitHub Copilot to configure settings and scaffolding
+4. Verify the blank app skeleton runs
+
+---
+
+## Step 1 — Choose Your Use-Case
+
+Before touching any code you need a clear domain description. Answer these questions:
+
+**What does your app do?** (1–2 sentences)
+
+> Example: "An SME Lending Advisor that helps relationship managers assess credit eligibility,
+> check outstanding facility status, and identify covenant compliance risks for small business customers."
+
+**What are 3–5 example questions a user would ask?**
+
+> Example:
+> - "What is the current credit limit for customer ABC Corp?"
+> - "Are there any covenant breaches on the XYZ facility?"
+> - "Is this customer eligible for a £500k working capital facility?"
+
+**What specialist agents will you build?** (typically 3–4)
+
+Think about what DATA SOURCES each agent needs and whether that data is:
+- **PUBLIC** — can flow through any agent, no restrictions
+- **CONFIDENTIAL** — user or customer-specific; needs row-level security
+
+> Example agents for SME Lending:
+> - `credit_eligibility_agent` — PUBLIC + CONFIDENTIAL — checks credit bureau + customer data
+> - `facility_status_agent` — CONFIDENTIAL — queries the loan management system (private MCP)
+> - `covenant_monitor_agent` — CONFIDENTIAL — checks covenant compliance from financial data
+> - `market_risk_agent` — PUBLIC — sector risk signals, industry news
+
+**What are your data sources?**
+
+> Example:
+> - Internal loan management system (CONFIDENTIAL → private MCP server)
+> - Credit bureau API (public-ish → function tool or external MCP)
+> - News and sector data (PUBLIC → Bing Grounding or public API)
+
+Write these down — you will paste them directly into the AI coding prompt below.
+
+---
+
+## Step 2 — Copy the Template
+
+```powershell
+cd d:\repos\hackathon
+
+# Create your app directory from the template
+Copy-Item -Recurse template\backend my-app\backend
+Copy-Item -Recurse template\frontend my-app\frontend
+Copy-Item -Recurse template\mcp-servers my-app\mcp-servers
+
+# Copy shared infra and tooling (use as-is)
+Copy-Item -Recurse infra my-app\infra
+Copy-Item -Recurse scripts my-app\scripts
+Copy-Item -Recurse evaluations my-app\evaluations
+Copy-Item azure.yaml my-app\
+Copy-Item docker-compose.aspire.yml my-app\
+
+cd my-app
+```
+
+Review the template structure:
 
 ```
-User Query
-    |
-    v
-Triage Agent (analyses intent)
-    |
-    +---> market_intel_agent  (market news, stock analysis)
-    +---> portfolio_agent      (user holdings, performance)
-    +---> economic_agent       (macroeconomic indicators)
-    +---> private_data_agent   (real-time quotes, fundamentals)
+my-app/
+  backend/
+    app/
+      core/          <- NEVER MODIFY — auth, observability, sessions, guardrails
+      agents/        <- YOUR CODE — one file per specialist agent
+      workflows/
+        workflow.py  <- YOUR CODE — HandoffBuilder/ConcurrentBuilder wiring
+      routes/
+        domain.py    <- YOUR CODE — domain-specific REST endpoints
+      config.py      <- MODIFY — add your domain settings
+      main.py        <- MODIFY — update title, mount your routes
+    .env.example     <- MODIFY — document all your env vars
+  frontend/
+    src/
+      components/
+        ChatPanel.tsx  <- MODIFY — update example prompts for your domain
+        Dashboard.tsx  <- MODIFY — your domain data visualisation
+  mcp-servers/
+    my-mcp/
+      server.py      <- YOUR CODE — private data MCP server
 ```
 
-### Critical Requirement
-**All agents in a HandoffBuilder workflow MUST set `require_per_service_call_history_persistence=True`**.
-This enables the framework to correctly maintain context across handoffs.
+---
 
-```python
-from agent_framework import Agent
-from agent_framework.orchestrations import HandoffBuilder
+## Step 3 — Run Coding Prompt Step 1 (Define & Configure)
 
-# CORRECT
-triage = Agent(
-    client=client,
-    instructions="Triage agent instructions...",
-    require_per_service_call_history_persistence=True,  # REQUIRED
-)
-specialist = Agent(
-    client=client,
-    instructions="Specialist instructions...",
-    require_per_service_call_history_persistence=True,  # REQUIRED
-)
+Open GitHub Copilot Chat in VS Code (agent mode). Paste and fill in the following prompt,
+substituting your answers from Step 1:
 
-workflow = (
-    HandoffBuilder(
-        name="portfolio-workflow",
-        participants=[triage, specialist],
-    )
-    .with_start_agent(triage)
-    .build()
-)
+> The full prompt template is in [template/docs/coding-prompts/README.md](../../template/docs/coding-prompts/README.md) — Step 1.
 
-# Run the workflow
-result = await workflow.run("What is the Apple stock price?", session=session)
+```
+I am building a multi-agent application called "<YOUR APP NAME>" using Microsoft
+Agent Framework v1.0.0 and Azure AI Foundry.
+
+The use-case is: <1-2 sentence description>
+
+Example user questions this app should answer:
+- <question 1>
+- <question 2>
+- <question 3>
+
+The app will have these specialist agents:
+- <Agent A name>: handles <what it does, what data it uses, PUBLIC or CONFIDENTIAL>
+- <Agent B name>: handles <what it does, what data it uses, PUBLIC or CONFIDENTIAL>
+- <Agent C name>: handles <what it does, what data it uses, PUBLIC or CONFIDENTIAL>
+
+My data sources are:
+- <Source 1>: <description, public or private, how accessed — MCP, function tool, Bing, etc.>
+- <Source 2>: <description, public or private, how accessed>
+
+Tasks:
+1. Update `my-app/backend/app/config.py`:
+   - Rename azure_cosmos_database_name default to match my app
+   - Rename azure_search_index_name default to match my app
+   - Rename otel_service_name default to my app slug
+   - Add domain-specific settings in the DOMAIN-SPECIFIC section:
+     one MCP URL per private data source, relevant API key fields,
+     and Foundry agent name fields for each specialist agent
+
+2. Update `my-app/backend/app/main.py`:
+   - Update the FastAPI title and description to match my app
+
+3. Create `my-app/backend/.env.example` listing all required environment variables
+   with placeholder values and a comment explaining each.
+
+4. Update `my-app/frontend/src/components/ChatPanel.tsx`:
+   - Replace the PROMPT_GROUPS constant with 3-4 example prompts relevant to my domain
 ```
 
-## Exercise 1: Test routing decisions
+Review the changes Copilot makes, then apply them.
 
-Send messages that should route to different specialists:
+---
+
+## Step 4 — Set Up Your Python Environment
 
 ```bash
-# Should route to market_intel
-curl -X POST http://localhost:8000/api/chat/message \
-  -H "Content-Type: application/json" \
-  -d '{"message": "What are analysts saying about Nvidia?", "session_id": "test-market"}'
-
-# Should route to portfolio
-curl -X POST http://localhost:8000/api/chat/message \
-  -H "Content-Type: application/json" \
-  -d '{"message": "Show me my current portfolio holdings", "session_id": "test-portfolio"}'
-
-# Should route to economic
-curl -X POST http://localhost:8000/api/chat/message \
-  -H "Content-Type: application/json" \
-  -d '{"message": "What is the current inflation rate?", "session_id": "test-economic"}'
+cd my-app\backend
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+cd ..\..
 ```
 
-Inspect the SSE events in the response — you will see `type: "handoff"` events showing routing decisions.
+---
 
-## Exercise 2: Inspect the triage instructions
+## Step 5 — Create Your .env File
 
-Open `backend/app/agents/market_intel.py` and find the `TRIAGE_INSTRUCTIONS` string in `portfolio_workflow.py`.
-The triage agent is given explicit routing rules — this is by design. LLM-only routing without explicit rules can be non-deterministic.
+```bash
+cd my-app\backend
+Copy-Item .env.example .env
+```
 
-**Challenge**: Add a new routing rule for "Options trading" queries and create a stub options agent.
+Fill in the same values from `azd env get-values` that you used for the reference app in Module 02.
+The core infrastructure (Foundry, Cosmos DB, AI Search, App Insights) is shared — your app
+does not need its own deployment yet.
 
-## Exercise 3: Stream handoff traces to the UI
+Add placeholder values for your domain-specific settings (you will fill these in later):
 
-The React frontend `ChatPanel.tsx` already captures `type: "handoff"` SSE events and displays agent badges.
-Open the browser at http://localhost:5173 and watch the agent routing in the chat UI.
+```
+# Your domain settings (fill in Module 05 when you build the MCP server)
+MY_MCP_URL=http://localhost:8003/mcp
+```
 
-## Key Code References
-- [backend/app/workflows/portfolio_workflow.py](../../backend/app/workflows/portfolio_workflow.py) — HandoffBuilder + ConcurrentBuilder
-- [backend/app/routes/chat.py](../../backend/app/routes/chat.py) — SSE streaming endpoint
+---
 
-## Next: [Module 04 — MCP Servers](./04-mcp-servers.md)
+## Step 6 — Start the Blank App
+
+```bash
+cd my-app\backend
+.venv\Scripts\activate
+uvicorn app.main:app --reload --port 8000
+```
+
+Expected output includes:
+
+```
+INFO:     <YOUR APP NAME> API starting up
+INFO:     Foundry endpoint: https://...
+INFO:     Application startup complete.
+```
+
+Verify the health check:
+
+```bash
+Invoke-RestMethod "http://localhost:8000/health"
+```
+
+Expected:
+
+```json
+{"status": "healthy", "version": "1.0.0", "foundry_endpoint": "https://..."}
+```
+
+The app has no domain routes yet — that is expected. The core routes (`/health`, `/api/sessions`)
+are already working from `app/core/`.
+
+---
+
+## Verification Checkpoint
+
+- [ ] Template copied into `my-app/`
+- [ ] `config.py` has your domain-specific settings
+- [ ] `main.py` title matches your app name
+- [ ] `.env.example` documents all variables
+- [ ] Backend starts without errors and `/health` returns `{"status": "healthy"}`
+
+---
+
+## Next: [Module 04 — Build Specialist Agents & Workflow](./04-mcp-servers.md)

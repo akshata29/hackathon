@@ -1,6 +1,9 @@
 # ============================================================
 # FastAPI application entry point
 # Features: CORS, Entra auth middleware, WebSocket chat, health check
+#
+# CORE routes  (app.core.routes) — generic, unchanged across use-cases
+# DOMAIN routes (app.routes)     — portfolio-advisor specific
 # ============================================================
 
 import logging
@@ -12,8 +15,9 @@ from fastapi.middleware.cors import CORSMiddleware
 load_dotenv()
 
 from app.config import get_settings
-from app.observability.setup import configure_observability
-from app.routes import chat, health, portfolio, sessions
+from app.core.observability.setup import configure_observability
+from app.core.routes import health, sessions
+from app.routes import chat, portfolio
 
 # Configure observability BEFORE creating routes
 # Reference: https://github.com/microsoft/agent-framework/tree/main/python/samples/02-agents/observability

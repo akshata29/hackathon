@@ -13,7 +13,7 @@
 
 import logging
 
-from app.config import Settings
+from app.core.agents.base import BaseAgent
 
 logger = logging.getLogger(__name__)
 
@@ -36,45 +36,58 @@ When data is unavailable, say so clearly. Do not fabricate portfolio data.
 """.strip()
 
 
-def create_portfolio_agent(client, portfolio_mcp_url: str, user_token: str | None = None, mcp_auth_token: str | None = None):
-    """
-    Create the portfolio data agent for use in the Handoff workflow.
+class PortfolioDataAgent(BaseAgent):
+    """Portfolio holdings, P&L, performance, and risk agent backed by Portfolio MCP."""
 
-    Tool configuration:
-    - Primary: Microsoft Fabric Data Agent tool (when Fabric workspace is available)
-    - Fallback: Portfolio DB MCP server (private, internal Container App)
+    name = "portfolio_agent"
+    description = "Portfolio holdings, positions, P&L, performance, risk metrics"
+    system_message = PORTFOLIO_DATA_INSTRUCTIONS
 
-    Security: The Portfolio MCP server enforces row-level security based on the
-    user identity token passed in the X-User-Id header.
+    @classmethod
+    def build_tools(
+        cls,
+        portfolio_mcp_url: str,
+        user_token: str | None = None,
+        mcp_auth_token: str | None = None,
+        **kwargs,
+    ) -> list:
+        """
+        Build the Portfolio MCP tool.
 
-    Args:
-        client: FoundryChatClient instance
-        portfolio_mcp_url: Internal URL of the portfolio MCP server
-        user_token: Optional user identity for row-level security enforcement
-        mcp_auth_token: Bearer token for MCP server authentication
+        Security: The Portfolio MCP server enforces row-level security based on the
+        user identity propagated via the X-User-Id header.
 
-    Reference for MCP tool: https://learn.microsoft.com/en-us/azure/foundry/agents/how-to/tools/model-context-protocol
-    """
-    import httpx
-    from agent_framework import Agent, MCPStreamableHTTPTool
+        Reference: https://learn.microsoft.com/en-us/azure/foundry/agents/how-to/tools/model-context-protocol
+        """
+        import httpx
+        from agent_framework import MCPStreamableHTTPTool
 
-    http_client = httpx.AsyncClient(
-        headers={
-            "X-User-Id": user_token or "anonymous",
-            "Authorization": f"Bearer {mcp_auth_token or 'dev-portfolio-mcp-token'}",
-        },
-    )
-    mcp_tool = MCPStreamableHTTPTool(
-        name="PortfolioData",
-        url=f"{portfolio_mcp_url}/mcp",
-        approval_mode="never_require",
-        http_client=http_client,
-    )
+        http_client = httpx.AsyncClient(
+            headers={
+                "X-User-Id": user_token or "anonymous",
+                "Authorization": f"Bearer {mcp_auth_token or 'dev-portfolio-mcp-token'}",
+            },
+        )
+        return [
+            MCPStreamableHTTPTool(
+                name="PortfolioData",
+                url=f"{portfolio_mcp_url}/mcp",
+                approval_mode="never_require",
+                http_client=http_client,
+            )
+        ]
 
-    return Agent(
-        client=client,
-        name="portfolio_agent",
-        instructions=PORTFOLIO_DATA_INSTRUCTIONS,
-        tools=[mcp_tool],
-        require_per_service_call_history_persistence=True,
+
+def create_portfolio_agent(
+    client,
+    portfolio_mcp_url: str,
+    user_token: str | None = None,
+    mcp_auth_token: str | None = None,
+):
+    """Backward-compat factory — prefer PortfolioDataAgent.create() in new code."""
+    return PortfolioDataAgent.create(
+        client,
+        portfolio_mcp_url=portfolio_mcp_url,
+        user_token=user_token,
+        mcp_auth_token=mcp_auth_token,
     )

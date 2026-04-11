@@ -12,7 +12,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends
 
-from app.auth.middleware import require_authenticated_user
+from app.core.auth.middleware import require_authenticated_user
 from app.config import Settings, get_settings
 
 logger = logging.getLogger(__name__)

@@ -2,6 +2,13 @@
 # Application configuration using Pydantic Settings
 # Reads from environment variables (set by azd / Container Apps)
 # Reference: https://learn.microsoft.com/en-us/azure/container-apps/environment-variables
+#
+# Settings are split into two sections:
+#   CORE INFRASTRUCTURE — shared by every use-case built from this template.
+#     Do not remove or rename core settings; they wire auth, observability,
+#     session management, and Agent Framework.
+#   DOMAIN-SPECIFIC — specific to the Portfolio Advisor example.
+#     When building a new use-case, replace this section with your own vars.
 # ============================================================
 
 from functools import lru_cache
@@ -11,7 +18,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    # Azure Managed Identity
+    # ==================================================================
+    # CORE INFRASTRUCTURE SETTINGS
+    # These are required by app/core/* and must be present in every
+    # use-case that builds from this template.
+    # ==================================================================
+
+    # Azure Managed Identity client ID (optional; leave empty in local dev)
     azure_client_id: str = ""
 
     # Azure AI Foundry (Response API v2)
@@ -25,7 +38,7 @@ class Settings(BaseSettings):
     azure_cosmos_database_name: str = "portfolio-advisor"
     azure_cosmos_container_name: str = "conversations"
     azure_cosmos_checkpoints_container: str = "workflow-checkpoints"
-    azure_cosmos_sessions_container: str = "chat-sessions"  # Per-user chat session history
+    azure_cosmos_sessions_container: str = "chat-sessions"
     azure_cosmos_key: str = ""  # Leave empty to use Managed Identity
 
     # Azure AI Search — RAG over research documents
@@ -34,25 +47,37 @@ class Settings(BaseSettings):
     azure_search_index_name: str = "portfolio-research"
     azure_search_api_key: str = ""  # Leave empty to use Managed Identity
 
-    # Observability — Azure Monitor
+    # Observability — Azure Monitor + OpenTelemetry
     applicationinsights_connection_string: str = ""
     enable_instrumentation: bool = True
     enable_sensitive_data: bool = False  # Never true in production
+    otel_service_name: str = "portfolio-advisor-backend"  # Override per use-case
+
+    # Entra ID authentication
+    entra_tenant_id: str = ""
+    entra_client_id: str = ""        # Frontend SPA app registration
+    entra_backend_client_id: str = ""  # Backend API app registration
+
+    @property
+    def entra_audience(self) -> str:
+        """JWT audience = the backend API app registration client ID."""
+        return self.entra_backend_client_id
+
+    # ==================================================================
+    # DOMAIN-SPECIFIC SETTINGS  (Portfolio Advisor example)
+    # When building a new use-case, replace everything below this line
+    # with your own domain configuration variables.
+    # ==================================================================
 
     # Private MCP server URLs (internal Container Apps FQDNs)
     yahoo_mcp_url: str = "http://localhost:8001"
     portfolio_mcp_url: str = "http://localhost:8002"
     mcp_auth_token: str = "dev-portfolio-mcp-token"  # Shared bearer token for internal MCP servers
 
-    # Remote hosted MCP server — Alpha Vantage (economic indicators, stocks, fundamentals, commodities)
+    # Remote hosted MCP server — Alpha Vantage (economic indicators, stocks, fundamentals)
     # Endpoint: https://mcp.alphavantage.co/mcp?apikey=<key>  — no local server needed
     alphavantage_mcp_url: str = "https://mcp.alphavantage.co/mcp"
     alphavantage_api_key: str = ""
-
-    # Entra authentication
-    entra_tenant_id: str = ""
-    entra_client_id: str = ""  # Frontend SPA app registration
-    entra_backend_client_id: str = ""  # Backend API app registration
 
     # Foundry agent names (created via scripts/setup-foundry.py)
     market_intel_agent_name: str = "portfolio-market-intel"

@@ -52,6 +52,18 @@ YAHOO_MCP = os.environ.get("YAHOO_MCP_URL", "http://localhost:8001/mcp")
 PORTFOLIO_MCP = os.environ.get("PORTFOLIO_MCP_URL", "http://localhost:8002/mcp")
 BING_CONNECTION_ID = os.environ.get("BING_CONNECTION_ID", "")
 
+# Azure management plane — needed for content filter setup
+AZURE_SUBSCRIPTION_ID = os.environ.get("AZURE_SUBSCRIPTION_ID", "")
+AZURE_RESOURCE_GROUP = os.environ.get("AZURE_RESOURCE_GROUP", "")
+
+# Extract the Cognitive Services account name from the endpoint
+# Endpoint format: https://<hub>.services.ai.azure.com/api/projects/<project>
+import re as _re
+_hub_match = _re.match(r"https://([^.]+)\.services\.ai\.azure\.com", ENDPOINT or "")
+HUB_NAME = _hub_match.group(1) if _hub_match else ""
+
+CONTENT_FILTER_POLICY_NAME = "portfolio-safety-policy"
+
 if not ENDPOINT:
     print("ERROR: FOUNDRY_PROJECT_ENDPOINT is not set.")
     sys.exit(1)
@@ -342,6 +354,111 @@ def build_planner_prompt(agents: list[dict], mcp_tool_map: dict[str, list[dict]]
 
 
 # ---------------------------------------------------------------------------
+# Content filter: create a Foundry RAI policy via the management plane and
+# attach it to the model deployment.
+#
+# Coverage:
+#   Harm categories  — hate, sexual, violence, self-harm (block at Medium / severity >= 4)
+#   Prompt Shields   — jailbreak (user attacks) + indirect_attack (document injection)
+#   Protected material — text and code detected on completions (logged, not blocked)
+#
+# Groundedness and Task Adherence are separate detection APIs and are not
+# deployment-level content filters; handle them explicitly if needed.
+# ---------------------------------------------------------------------------
+
+async def create_content_filter(credential) -> None:
+    """
+    PUT a Foundry RAI content filter policy and attach it to the model deployment.
+    Silently skips if AZURE_SUBSCRIPTION_ID or AZURE_RESOURCE_GROUP are not set
+    (e.g. local dev without azd context).
+    """
+    try:
+        import httpx
+    except ImportError:
+        print("  [skip] httpx not installed — skipping content filter setup")
+        return
+
+    if not AZURE_SUBSCRIPTION_ID or not AZURE_RESOURCE_GROUP or not HUB_NAME:
+        print(
+            "  [skip] AZURE_SUBSCRIPTION_ID / AZURE_RESOURCE_GROUP not set"
+            " — run via 'azd up' or set these env vars to create content filters"
+        )
+        return
+
+    print(f"\nSetting up content filter policy: {CONTENT_FILTER_POLICY_NAME} ...")
+
+    MGMT = "https://management.azure.com"
+    API_VER = "2025-04-01-preview"
+    rai_url = (
+        f"{MGMT}/subscriptions/{AZURE_SUBSCRIPTION_ID}"
+        f"/resourceGroups/{AZURE_RESOURCE_GROUP}"
+        f"/providers/Microsoft.CognitiveServices/accounts/{HUB_NAME}"
+        f"/raiPolicies/{CONTENT_FILTER_POLICY_NAME}?api-version={API_VER}"
+    )
+    deployment_url = (
+        f"{MGMT}/subscriptions/{AZURE_SUBSCRIPTION_ID}"
+        f"/resourceGroups/{AZURE_RESOURCE_GROUP}"
+        f"/providers/Microsoft.CognitiveServices/accounts/{HUB_NAME}"
+        f"/deployments/{MODEL}?api-version={API_VER}"
+    )
+
+    token = await credential.get_token(f"{MGMT}/.default")
+    headers = {
+        "Authorization": f"Bearer {token.token}",
+        "Content-Type": "application/json",
+    }
+
+    policy_body = {
+        "properties": {
+            "mode": "Blocking",
+            "contentFilters": [
+                # Harm categories — Prompt side
+                {"name": "hate",     "blocking": True, "enabled": True, "allowedContentLevel": "Medium", "source": "Prompt"},
+                {"name": "sexual",   "blocking": True, "enabled": True, "allowedContentLevel": "Medium", "source": "Prompt"},
+                {"name": "violence", "blocking": True, "enabled": True, "allowedContentLevel": "Medium", "source": "Prompt"},
+                {"name": "selfharm", "blocking": True, "enabled": True, "allowedContentLevel": "Medium", "source": "Prompt"},
+                # Harm categories — Completion side
+                {"name": "hate",     "blocking": True, "enabled": True, "allowedContentLevel": "Medium", "source": "Completion"},
+                {"name": "sexual",   "blocking": True, "enabled": True, "allowedContentLevel": "Medium", "source": "Completion"},
+                {"name": "violence", "blocking": True, "enabled": True, "allowedContentLevel": "Medium", "source": "Completion"},
+                {"name": "selfharm", "blocking": True, "enabled": True, "allowedContentLevel": "Medium", "source": "Completion"},
+                # Prompt Shields — block jailbreak and document injection on input
+                {"name": "jailbreak",       "blocking": True,  "enabled": True, "source": "Prompt"},
+                {"name": "indirect_attack", "blocking": True,  "enabled": True, "source": "Prompt"},
+                # Protected material — detect on completions (log only; not blocking)
+                {"name": "protected_material_text", "blocking": False, "enabled": True, "source": "Completion"},
+                {"name": "protected_material_code", "blocking": False, "enabled": True, "source": "Completion"},
+            ],
+        }
+    }
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        # 1. Create / update the RAI policy
+        resp = await client.put(rai_url, json=policy_body, headers=headers)
+        if resp.status_code not in (200, 201):
+            print(f"  [warn] Could not create policy ({resp.status_code}): {resp.text[:200]}")
+            return
+        print(f"  OK — policy created/updated")
+
+        # 2. GET current deployment config and PUT it back with the policy attached
+        get_resp = await client.get(deployment_url, headers=headers)
+        if get_resp.status_code != 200:
+            print(f"  [warn] Could not retrieve deployment config ({get_resp.status_code})"
+                  " — attach the policy manually in the Foundry portal.")
+            return
+
+        deployment_body = get_resp.json()
+        deployment_body.setdefault("properties", {})["raiPolicyName"] = CONTENT_FILTER_POLICY_NAME
+
+        put_resp = await client.put(deployment_url, json=deployment_body, headers=headers)
+        if put_resp.status_code in (200, 201, 202):
+            print(f"  OK — policy attached to deployment '{MODEL}'")
+        else:
+            print(f"  [warn] Policy created but could not attach to deployment"
+                  f" ({put_resp.status_code}): {put_resp.text[:200]}")
+
+
+# ---------------------------------------------------------------------------
 # Main: create agents in Foundry
 # ---------------------------------------------------------------------------
 
@@ -384,6 +501,9 @@ async def create_agents() -> None:
     print(f"\nConnecting to Foundry project: {ENDPOINT}\n")
 
     async with DefaultAzureCredential() as credential:
+        # Set up content filter policy before creating agents
+        await create_content_filter(credential)
+
         async with AIProjectClient(endpoint=ENDPOINT, credential=credential) as project_client:
             from azure.ai.projects.models import (
                 BingGroundingTool,

@@ -1,103 +1,230 @@
-# Workshop Module 02: Microsoft Agent Framework
+# Workshop Module 02: Explore the Reference Implementation
 
-## Learning Objectives
-- Understand `FoundryChatClient` vs `FoundryAgent`
-- Create your first agent with tools
-- Use `CosmosHistoryProvider` for conversation persistence
-- Enable Azure Monitor observability
+## Objective
 
-## Key Concepts
+Before building your own application you need to see the end state clearly.
+In this module you will run the **Portfolio Advisor reference implementation** locally,
+interact with it, and understand how the key architecture pieces fit together.
 
-### FoundryChatClient
-Lightweight client backed by an Azure AI Foundry project. Used for **all workflow orchestration** (HandoffBuilder, ConcurrentBuilder). Does NOT require pre-deployed server-side agent resources in the Foundry portal.
+This is your target — when your own app is finished it will work the same way.
 
-```python
-from agent_framework.foundry import FoundryChatClient
-from azure.identity import DefaultAzureCredential
+---
 
-client = FoundryChatClient(
-    project_endpoint="https://<hub>.services.ai.azure.com/api/projects/<project>",
-    model="gpt-4o",
-    credential=DefaultAzureCredential(),
-)
+## Architecture Recap
+
+```
+User (React SPA + Entra Auth)
+         |
+         | HTTPS + Server-Sent Events (streaming)
+         v
+FastAPI Backend  (app/main.py)
+         |
+    PortfolioOrchestrator
+    (HandoffBuilder workflow)
+         |
+   +-----+------+--------+----------+
+   |     |      |        |          |
+Triage Market  Portfolio Economic  Private
+Agent  Intel   Agent     Agent     Data
+       Agent   |                  Agent
+       |       | Portfolio DB MCP    |
+    Bing       | (internal)        Yahoo Finance MCP
+  Grounding    |                   (internal)
+               v
+          AI Search RAG
+        (research documents)
 ```
 
-### FoundryAgent
-Connects to a **pre-deployed Prompt Agent** in the Foundry portal (configured with tools, grounding, etc. via the UI). Use this when you want to reference a portal-configured agent from code.
+**Data classification boundaries**:
+- `market_intel`, `economic`, `private_data` agents → PUBLIC data only
+- `portfolio` agent → CONFIDENTIAL (user holdings, P&L)  
+- CONFIDENTIAL data never flows through PUBLIC agents
 
-```python
-from agent_framework.foundry import FoundryAgent
+---
 
-agent = FoundryAgent(
-    project_endpoint="...",
-    agent_name="my-portal-agent",
-    credential=DefaultAzureCredential(),
-)
-```
+## Step 1 — Configure Environment Variables
 
-### Agent with context providers
-```python
-from agent_framework import Agent
-from agent_framework.azure import CosmosHistoryProvider
+Copy the example environment file and fill in the values from your `azd` deployment:
 
-async with CosmosHistoryProvider(
-    endpoint=cosmos_endpoint,
-    database_name="portfolio-advisor",
-    container_name="conversations",
-    credential=DefaultAzureCredential(),
-) as history_provider:
-    async with Agent(
-        client=client,
-        instructions="You are a helpful financial advisor.",
-        context_providers=[history_provider],
-    ) as agent:
-        session = agent.create_session(session_id="user123:conv456")
-        result = await agent.run("How is my portfolio doing?", session=session)
-        print(result.content)
-```
-
-## Exercise 1: Run the agent locally
-
-1. Install dependencies:
 ```bash
-cd backend
+cd d:\repos\hackathon\backend
+Copy-Item .env.example .env
+```
+
+Now populate `.env` with your deployment outputs:
+
+```bash
+# PowerShell — fill in all core settings at once
+$vals = azd env get-values --output json | ConvertFrom-Json
+@"
+FOUNDRY_PROJECT_ENDPOINT=$($vals.FOUNDRY_PROJECT_ENDPOINT)
+AZURE_COSMOS_ENDPOINT=$($vals.AZURE_COSMOS_ENDPOINT)
+AZURE_SEARCH_ENDPOINT=$($vals.AZURE_SEARCH_ENDPOINT)
+APPLICATIONINSIGHTS_CONNECTION_STRING=$($vals.APPLICATIONINSIGHTS_CONNECTION_STRING)
+ENTRA_TENANT_ID=$($vals.AZURE_TENANT_ID)
+ENTRA_CLIENT_ID=$($vals.ENTRA_CLIENT_ID)
+ENTRA_BACKEND_CLIENT_ID=$($vals.ENTRA_BACKEND_CLIENT_ID)
+"@ | Set-Content d:\repos\hackathon\backend\.env -Encoding UTF8
+```
+
+---
+
+## Step 2 — Start the MCP Servers Locally
+
+Open two terminals:
+
+**Terminal 1 — Portfolio DB MCP**:
+```bash
+cd d:\repos\hackathon\mcp-servers\portfolio-db
 pip install -r requirements.txt
+MCP_AUTH_TOKEN=dev-token python server.py
+# Listening on http://0.0.0.0:8002
 ```
 
-2. Copy environment file:
+**Terminal 2 — Yahoo Finance MCP**:
 ```bash
-cp .env.example .env
-# Fill in FOUNDRY_PROJECT_ENDPOINT and other values from azd env get-values
+cd d:\repos\hackathon\mcp-servers\yahoo-finance
+pip install -r requirements.txt
+MCP_AUTH_TOKEN=dev-token python server.py
+# Listening on http://0.0.0.0:8001
 ```
 
-3. Start the backend:
+---
+
+## Step 3 — Start the Backend
+
+Open a third terminal:
+
 ```bash
-uvicorn app.main:app --reload
+cd d:\repos\hackathon\backend
+.venv\Scripts\activate
+uvicorn app.main:app --reload --port 8000
 ```
 
-4. Test the health endpoint:
+Wait for: `Application startup complete.`
+
+---
+
+## Step 4 — Start the Frontend
+
+Open a fourth terminal:
+
 ```bash
-curl http://localhost:8000/health
+cd d:\repos\hackathon\frontend
+npm install
+npm run dev
+# Vite dev server at http://localhost:5173
 ```
 
-5. Send a chat message:
+Open [http://localhost:5173](http://localhost:5173) in your browser.
+
+---
+
+## Step 5 — Interact with the Portfolio Advisor
+
+Try each of these queries and observe which agent handles each one:
+
+| Query | Expected agent | Why |
+|-------|---------------|-----|
+| "What are analysts saying about Nvidia this week?" | `market_intel` | Public market news |
+| "Show me my current portfolio allocation" | `portfolio` | Confidential holdings |
+| "What is the current US inflation rate?" | `economic` | Macro indicators |
+| "What is Apple's P/E ratio right now?" | `private_data` | Real-time fundamentals |
+| "Give me a comprehensive portfolio review" | All 4 (parallel) | Triggers ConcurrentBuilder |
+
+Watch the **agent badges** that appear in the chat UI — they show the routing decision in real time.
+
+---
+
+## Step 6 — Read the Agent Routing Code
+
+Open [backend/app/workflows/portfolio_workflow.py](../../backend/app/workflows/portfolio_workflow.py).
+
+Find the `TRIAGE_INSTRUCTIONS` constant. This is the system prompt that tells the triage agent
+how to route. Key observations:
+
+1. **Explicit routing rules** — the triage agent is given precise categories, not a vague description.
+   LLM-only routing without explicit rules is non-deterministic.
+2. **COMPREHENSIVE_ANALYSIS_REQUESTED trigger** — a literal string the triage agent emits when
+   it detects a multi-faceted query. The backend switches to `ConcurrentBuilder` on this trigger.
+3. **REQUEST_BLOCKED** — the triage agent is instructed to detect prompt injection attempts.
+
+---
+
+## Step 7 — Inspect the SSE Event Stream
+
+The backend streams results as Server-Sent Events. Watch the raw events:
+
 ```bash
-curl -X POST http://localhost:8000/api/chat/message \
-  -H "Content-Type: application/json" \
-  -d '{"message": "What is the outlook for technology stocks?", "session_id": "test-001"}'
+# PowerShell
+$body = '{"message": "What is the current inflation rate?", "session_id": "explore-test-01"}'
+Invoke-RestMethod `
+  -Method POST `
+  -Uri "http://localhost:8000/api/chat/message" `
+  -ContentType "application/json" `
+  -Body $body `
+  -Headers @{"Accept"="text/event-stream"}
 ```
 
-## Exercise 2: Add Azure Monitor observability
+You will see a stream of JSON objects. The key event types are:
 
-Open `backend/app/observability/setup.py` and review how `configure_azure_monitor()` is called. Note:
-- `enable_sensitive_data=False` — NEVER change this in production
-- `enable_instrumentation()` activates agent-framework telemetry
-- Token usage, agent routing decisions, and tool calls all appear in App Insights
+| Event type | Meaning |
+|-----------|---------|
+| `handoff` | Triage decided which specialist agent to call |
+| `text_delta` | Streaming token from the current agent |
+| `tool_call` | An agent is calling an MCP tool or search provider |
+| `tool_result` | The tool returned data |
+| `message_complete` | Agent finished its response |
 
-View traces: Navigate to your App Insights resource → Live Metrics or Application Map.
+---
 
-## Key Code References
-- [backend/app/agents/market_intel.py](../../backend/app/agents/market_intel.py) — market intelligence agent
+## Step 8 — Read the Core Agent Files
+
+Take 10 minutes to read these files (they are the patterns you will follow):
+
+| File | What it shows |
+|------|--------------|
+| [backend/app/agents/market_intel.py](../../backend/app/agents/market_intel.py) | Agent backed by a Foundry Prompt Agent (Bing Grounding) |
+| [backend/app/agents/portfolio_data.py](../../backend/app/agents/portfolio_data.py) | Agent using a private MCP server with user_token |
+| [backend/app/agents/economic_data.py](../../backend/app/agents/economic_data.py) | Agent using an external public MCP server |
+| [backend/app/agents/private_data.py](../../backend/app/agents/private_data.py) | Agent using another external MCP server |
+| [backend/app/core/workflows/base.py](../../backend/app/core/workflows/base.py) | BaseOrchestrator — do not modify; your workflow extends this |
+| [backend/app/workflows/portfolio_workflow.py](../../backend/app/workflows/portfolio_workflow.py) | Domain orchestrator — the pattern you will copy |
+
+---
+
+## Key Concepts to Take Forward
+
+**FoundryChatClient** — used for all HandoffBuilder and ConcurrentBuilder orchestration.
+Does not require pre-deployed server-side agents in Foundry portal.
+
+**FoundryAgent (RawFoundryAgentChatClient)** — connects to a Prompt Agent configured in the
+Foundry portal (with Bing Grounding, Knowledge Bases, etc.). Used for agents that need
+portal-managed integrations.
+
+**require_per_service_call_history_persistence=True** — **every agent in a HandoffBuilder
+workflow MUST set this**. Without it, conversation context breaks across handoffs.
+
+**CompactionProvider + TokenBudgetComposedStrategy** — automatically summarises old conversation
+turns when the token budget approaches the model's context window. Essential for long sessions.
+
+**AzureAISearchContextProvider** — injects relevant search results directly into the agent's
+system context on every call. The agent does not need to call a search tool explicitly.
+
+---
+
+## Verification Checkpoint
+
+Before moving to Module 03, confirm:
+
+- [ ] All 4 agents route correctly for the 4 example queries
+- [ ] Comprehensive query triggers parallel execution (all agent badges appear)
+- [ ] Raw SSE stream shows `handoff` events
+- [ ] You can explain what `require_per_service_call_history_persistence` does
+
+---
+
+## Next: [Module 03 — Define Your Use-Case & Configure](./03-handoff-orchestration.md)
 - [backend/app/observability/setup.py](../../backend/app/observability/setup.py) — observability setup
 - [backend/app/conversation/session_manager.py](../../backend/app/conversation/session_manager.py) — Cosmos session management
 

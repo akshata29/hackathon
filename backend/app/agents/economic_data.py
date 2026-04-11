@@ -12,6 +12,8 @@
 
 import logging
 
+from app.core.agents.base import BaseAgent
+
 logger = logging.getLogger(__name__)
 
 ECONOMIC_DATA_INSTRUCTIONS = """
@@ -164,28 +166,32 @@ def _build_av_tools(api_key: str):
     ]
 
 
-def create_economic_agent(client, alphavantage_mcp_url: str, alphavantage_api_key: str = ""):
-    """
-    Create the economic data agent using Alpha Vantage REST API via direct FunctionTools.
+class EconomicDataAgent(BaseAgent):
+    """Macro economic data agent using Alpha Vantage REST API via FunctionTools."""
 
-    The Alpha Vantage MCP meta-tool pattern (TOOL_LIST/TOOL_GET/TOOL_CALL) conflicts with
-    the agent framework's internal call_tool(tool_name, ...) method signature, causing
-    "multiple values for argument 'tool_name'" errors. Bypassing MCP in favour of direct
-    REST API calls via FunctionTool resolves this entirely.
+    name = "economic_agent"
+    description = "Economic data: GDP, inflation, yield curve, Fed rates, commodities, forex"
+    system_message = ECONOMIC_DATA_INSTRUCTIONS
 
-    Args:
-        client: FoundryChatClient instance
-        alphavantage_mcp_url: Unused (kept for interface compatibility)
-        alphavantage_api_key: Alpha Vantage API key
-    """
-    from agent_framework import Agent
+    @classmethod
+    def build_tools(cls, alphavantage_api_key: str = "", **kwargs) -> list:
+        """
+        Build Alpha Vantage FunctionTools.
 
-    tools = _build_av_tools(alphavantage_api_key)
+        Note: The Alpha Vantage MCP meta-tool pattern (TOOL_LIST/TOOL_GET/TOOL_CALL)
+        conflicts with the agent framework\'s internal call_tool() signature, causing
+        "multiple values for argument 'tool_name'" errors.  Direct REST FunctionTools
+        bypass this entirely.
+        """
+        if alphavantage_api_key:
+            return _build_av_tools(alphavantage_api_key)
+        return []
 
-    return Agent(
-        client=client,
-        name="economic_agent",
-        instructions=ECONOMIC_DATA_INSTRUCTIONS,
-        tools=tools,
-        require_per_service_call_history_persistence=True,
-    )
+
+def create_economic_agent(
+    client,
+    alphavantage_mcp_url: str,
+    alphavantage_api_key: str = "",
+):
+    """Backward-compat factory — prefer EconomicDataAgent.create() in new code."""
+    return EconomicDataAgent.create(client, alphavantage_api_key=alphavantage_api_key)

@@ -15,6 +15,7 @@ import logging
 from azure.identity.aio import DefaultAzureCredential
 
 from app.config import Settings
+from app.core.agents.base import BaseAgent
 
 logger = logging.getLogger(__name__)
 
@@ -36,52 +37,54 @@ When citing sources, always include: source name, publication date, and key quot
 """.strip()
 
 
+class MarketIntelAgent(BaseAgent):
+    """Market intelligence agent backed by a Foundry Prompt Agent with Bing Grounding."""
+
+    name = "market_intel_agent"
+    description = "Market news, analyst ratings, earnings, sector trends (Bing-grounded)"
+    system_message = MARKET_INTEL_INSTRUCTIONS
+
+    @classmethod
+    def create(cls, settings, credential, context_providers=None, **kwargs):
+        """
+        Override create() — this agent builds its own RawFoundryAgentChatClient
+        rather than accepting a shared FoundryChatClient.
+
+        Uses Agent + RawFoundryAgentChatClient so that:
+        - The agent satisfies HandoffBuilder's isinstance(participant, Agent) check
+        - The underlying client connects to the pre-configured Foundry Prompt Agent
+          (portfolio-market-intel) which has Bing Grounding baked in server-side.
+
+        Bing Grounding is a *hosted* tool on the Foundry Agents service — it must be
+        defined on the server-side agent definition, not attached at call time.
+
+        Args:
+            settings: Application Settings (foundry_project_endpoint, market_intel_agent_name)
+            credential: Shared AsyncTokenCredential (from the orchestrator)
+            context_providers: Optional list (e.g. AzureAISearchContextProvider)
+        """
+        from agent_framework import Agent
+        from agent_framework.foundry import RawFoundryAgentChatClient
+
+        market_client = RawFoundryAgentChatClient(
+            project_endpoint=settings.foundry_project_endpoint,
+            agent_name=settings.market_intel_agent_name,
+            credential=credential,
+        )
+        agent_kwargs = {
+            "client": market_client,
+            "name": cls.name,
+            "instructions": cls.system_message,
+            "require_per_service_call_history_persistence": True,
+        }
+        if context_providers:
+            agent_kwargs["context_providers"] = context_providers
+        return Agent(**agent_kwargs)
+
+
 def create_market_intel_agent(settings, credential, context_providers=None):
-    """
-    Create the market intelligence agent for use in the Handoff workflow.
-
-    Uses Agent + RawFoundryAgentChatClient so that:
-    - The agent satisfies HandoffBuilder's isinstance(participant, Agent) check
-    - The underlying client connects to the pre-configured Foundry Prompt Agent
-      (portfolio-market-intel) which has Bing Grounding baked into its server-side
-      definition (configured by scripts/setup-foundry.py).
-
-    Bing Grounding is a *hosted* tool on the Foundry Agents service — it cannot be
-    attached at call time via a FunctionTool. It must be defined on the server-side
-    agent definition, which is exactly what setup-foundry.py does via BingGroundingTool
-    in the PromptAgentDefinition.
-
-    Args:
-        settings: Application Settings (provides project endpoint, market_intel_agent_name)
-        credential: Shared AsyncTokenCredential (DefaultAzureCredential from the workflow)
-        context_providers: Optional list (e.g., AzureAISearchContextProvider for research docs)
-
-    Returns:
-        Agent configured for handoff workflow participation backed by the Foundry Prompt Agent
-    """
-    from agent_framework import Agent
-    from agent_framework.foundry import RawFoundryAgentChatClient
-
-    # RawFoundryAgentChatClient connects to the pre-existing Foundry Prompt Agent by name.
-    # The Prompt Agent has Bing Grounding configured server-side — no tool needs to be
-    # passed here at call time.
-    market_client = RawFoundryAgentChatClient(
-        project_endpoint=settings.foundry_project_endpoint,
-        agent_name=settings.market_intel_agent_name,
-        credential=credential,
-    )
-
-    kwargs = {
-        "client": market_client,
-        "name": "market_intel_agent",
-        "instructions": MARKET_INTEL_INSTRUCTIONS,
-        # required by HandoffBuilder — all handoff participants must set this
-        "require_per_service_call_history_persistence": True,
-    }
-    if context_providers:
-        kwargs["context_providers"] = context_providers
-
-    return Agent(**kwargs)
+    """Backward-compat factory — prefer MarketIntelAgent.create() in new code."""
+    return MarketIntelAgent.create(settings, credential, context_providers=context_providers)
 
 
 async def get_market_intel_foundry_agent(settings: Settings):

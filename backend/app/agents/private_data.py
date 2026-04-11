@@ -18,7 +18,7 @@
 
 import logging
 
-from app.config import Settings
+from app.core.agents.base import BaseAgent
 
 logger = logging.getLogger(__name__)
 
@@ -44,42 +44,55 @@ Always include data timestamp. Flag if quote is delayed vs. real-time.
 """.strip()
 
 
-def create_private_data_agent(client, yahoo_mcp_url: str, mcp_auth_token: str | None = None):
-    """
-    Create the private data agent consuming the Yahoo Finance MCP server.
+class PrivateDataAgent(BaseAgent):
+    """Real-time market data and company fundamentals agent backed by Yahoo Finance MCP."""
 
-    The Yahoo Finance MCP is a private internal service (not publicly accessible)
-    deployed as a Container App. Authentication uses Managed Identity-validated tokens.
+    name = "private_data_agent"
+    description = "Real-time quotes, company financials, valuation multiples, technical data"
+    system_message = PRIVATE_DATA_INSTRUCTIONS
 
-    Args:
-        client: FoundryChatClient instance
-        yahoo_mcp_url: Internal URL of the Yahoo Finance MCP Container App
-        mcp_auth_token: Optional authorization token (machine-to-machine)
+    @classmethod
+    def build_tools(
+        cls,
+        yahoo_mcp_url: str,
+        mcp_auth_token: str | None = None,
+        **kwargs,
+    ) -> list:
+        """
+        Build the Yahoo Finance MCP tool.
 
-    Design rationale:
-        Private MCP = controlled data boundary. The MCP server code is under our
-        control, so we can add rate limiting, audit logging, and PII scrubbing
-        before data reaches the agent. This is the "secure MCP" pattern.
-    """
-    import httpx
-    from agent_framework import Agent, MCPStreamableHTTPTool
+        The Yahoo Finance MCP is a private internal service — not publicly accessible.
+        Authentication uses a machine-to-machine bearer token.
 
-    http_headers = {}
-    if mcp_auth_token:
-        http_headers["Authorization"] = f"Bearer {mcp_auth_token}"
+        Design rationale: private MCP = controlled data boundary.  The MCP server
+        can add rate limiting, audit logging, and PII scrubbing before data reaches
+        the agent.  This is the "secure MCP" pattern.
+        """
+        import httpx
+        from agent_framework import MCPStreamableHTTPTool
 
-    http_client = httpx.AsyncClient(headers=http_headers)
-    mcp_tool = MCPStreamableHTTPTool(
-        name="YahooFinanceData",
-        url=f"{yahoo_mcp_url}/mcp",
-        approval_mode="never_require",  # Internal trusted service
-        http_client=http_client,
-    )
+        http_headers = {}
+        if mcp_auth_token:
+            http_headers["Authorization"] = f"Bearer {mcp_auth_token}"
 
-    return Agent(
-        client=client,
-        name="private_data_agent",
-        instructions=PRIVATE_DATA_INSTRUCTIONS,
-        tools=[mcp_tool],
-        require_per_service_call_history_persistence=True,
+        return [
+            MCPStreamableHTTPTool(
+                name="YahooFinanceData",
+                url=f"{yahoo_mcp_url}/mcp",
+                approval_mode="never_require",
+                http_client=httpx.AsyncClient(headers=http_headers),
+            )
+        ]
+
+
+def create_private_data_agent(
+    client,
+    yahoo_mcp_url: str,
+    mcp_auth_token: str | None = None,
+):
+    """Backward-compat factory — prefer PrivateDataAgent.create() in new code."""
+    return PrivateDataAgent.create(
+        client,
+        yahoo_mcp_url=yahoo_mcp_url,
+        mcp_auth_token=mcp_auth_token,
     )
