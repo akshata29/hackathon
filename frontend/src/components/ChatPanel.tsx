@@ -85,6 +85,18 @@ const PROMPT_GROUPS = [
     ],
   },
   {
+    label: 'ESG Advisor',
+    badge: 'A2A / LangChain agent',
+    color: 'text-lime-400',
+    border: 'border-lime-900/60',
+    requiresAuth: false,
+    prompts: [
+      'What is the ESG risk score for Microsoft and how does it compare to its tech peers?',
+      'Are there any ESG controversies or governance flags I should know about for Tesla?',
+      'Benchmark the ESG performance of MSFT, AAPL, and GOOGL against their sector peers',
+    ],
+  },
+  {
     label: 'Concurrent Analysis',
     badge: 'all agents in parallel',
     color: 'text-rose-400',
@@ -94,6 +106,7 @@ const PROMPT_GROUPS = [
       'Give me a full portfolio review with macro context and current valuations',
       'Should I rebalance given current Fed policy and my positions?',
       'Analyze my risk exposure across macro, sector, and position levels',
+      'Run a comprehensive sustainability review of my portfolio including ESG scores, macro risks, and position-level exposure',
     ],
   },
 ]

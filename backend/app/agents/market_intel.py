@@ -81,6 +81,16 @@ class MarketIntelAgent(BaseAgent):
             agent_kwargs["context_providers"] = context_providers
         return Agent(**agent_kwargs)
 
+    @classmethod
+    def create_from_context(cls, ctx: "AgentBuildContext"):
+        """Registry hook — build with the orchestrator's shared credential."""
+        from app.core.agents.base import AgentBuildContext  # noqa: F401
+        return cls.create(
+            ctx.settings,
+            ctx.credential,
+            context_providers=ctx.context_providers,
+        )
+
 
 def create_market_intel_agent(settings, credential, context_providers=None):
     """Backward-compat factory — prefer MarketIntelAgent.create() in new code."""

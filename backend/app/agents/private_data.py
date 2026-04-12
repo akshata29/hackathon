@@ -97,6 +97,19 @@ class PrivateDataAgent(BaseAgent):
         ]
 
 
+    @classmethod
+    def create_from_context(cls, ctx: "AgentBuildContext"):
+        """Registry hook — extract Yahoo Finance MCP config from settings."""
+        from app.core.agents.base import AgentBuildContext  # noqa: F401
+        return cls.create(
+            ctx.client,
+            yahoo_mcp_url=ctx.settings.yahoo_mcp_url,
+            mcp_auth_token=ctx.settings.mcp_auth_token,
+            raw_token=ctx.raw_token,
+            settings=ctx.settings,
+        )
+
+
 def create_private_data_agent(
     client,
     yahoo_mcp_url: str,

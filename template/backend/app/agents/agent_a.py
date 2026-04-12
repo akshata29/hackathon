@@ -124,9 +124,63 @@ class AgentA(BaseAgent):
         Option c — Hosted Foundry Prompt Agent (override create() instead of build_tools):
             Override the entire create() classmethod as shown in market_intel.py.
             Hosted agents have their tools configured server-side in Foundry portal.
+
+        Option d — A2A remote agent (wraps an external Agent-to-Agent server):
+            Use this when the specialist logic runs in a SEPARATE process or container
+            and communicates via the A2A (Agent-to-Agent) HTTP/JSON-RPC protocol.
+            The remote server can be built with ANY framework (LangChain, Semantic
+            Kernel, AutoGen, etc.) — the A2A protocol makes it framework-agnostic.
+
+            The A2AAgent is a drop-in replacement for a local Agent: HandoffBuilder
+            and ConcurrentBuilder treat it identically.
+
+            Override create_from_context() instead of build_tools():
+
+            @classmethod
+            def create_from_context(cls, ctx):
+                service_url = getattr(ctx.settings, "my_a2a_service_url", "")
+                if not service_url:
+                    return None   # silently skip when URL not configured
+                from agent_framework_a2a import A2AAgent
+                return A2AAgent(url=service_url, name=cls.name, description=cls.description)
+
+            Configure in .env:
+                MY_A2A_SERVICE_URL=http://localhost:8010
+
+            Reference implementation:
+                backend/app/agents/esg_advisor.py
+                a2a-agents/esg-advisor/server.py  (LangChain ReAct server stub)
         """
         # TODO: replace with your actual tool(s)
         return []
+
+    @classmethod
+    def create_from_context(cls, ctx: "AgentBuildContext"):
+        """Registry hook — called by the orchestrator's dynamic build loop.
+
+        Extract whatever config this agent needs from ctx and call create().
+        Return None to opt out (e.g. a required URL is not set in this environment).
+
+        TODO: replace the example below with your agent's actual config needs.
+
+        Example — FunctionTool or MCPStreamableHTTPTool agent:
+            return cls.create(
+                ctx.client,
+                mcp_url=ctx.settings.agent_a_mcp_url,
+                raw_token=ctx.raw_token,
+                settings=ctx.settings,
+            )
+
+        Example — A2A remote agent (option d above):
+            url = getattr(ctx.settings, "agent_a_a2a_url", "")
+            if not url:
+                return None
+            from agent_framework_a2a import A2AAgent
+            return A2AAgent(url=url, name=cls.name, description=cls.description)
+        """
+        from app.core.agents.base import AgentBuildContext  # noqa: F401
+        # TODO: implement for your agent
+        return cls.create(ctx.client)
 
 
 # Backward-compat factory — prefer AgentA.create() in new code

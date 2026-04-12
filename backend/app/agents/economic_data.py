@@ -188,6 +188,16 @@ class EconomicDataAgent(BaseAgent):
         return []
 
 
+    @classmethod
+    def create_from_context(cls, ctx: "AgentBuildContext"):
+        """Registry hook — extract Alpha Vantage key from settings."""
+        from app.core.agents.base import AgentBuildContext  # noqa: F401
+        return cls.create(
+            ctx.client,
+            alphavantage_api_key=ctx.settings.alphavantage_api_key,
+        )
+
+
 def create_economic_agent(
     client,
     alphavantage_mcp_url: str,

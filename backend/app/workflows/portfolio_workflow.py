@@ -32,6 +32,8 @@ ROUTING RULES (strictly follow — do not deviate):
 - Economic data, interest rates, Fed policy, yield curve, GDP, inflation, unemployment → economic_agent
 - Real-time quotes, company financials, valuation multiples, technical data -> private_data_agent
 - GitHub engineering activity, commit velocity, open-source health for a tech company -> github_intel_agent
+- ESG scores, sustainability ratings, carbon footprint, environmental/social/governance metrics,
+  responsible investing criteria, UN PRI alignment, MSCI ESG, or climate risk -> esg_advisor_agent
 MULTI-AGENT TRIGGER:
 If the user asks for a comprehensive portfolio review, risk assessment, or investment recommendation
 that requires MULTIPLE data types, respond with: "COMPREHENSIVE_ANALYSIS_REQUESTED"
@@ -143,58 +145,42 @@ class PortfolioOrchestrator(BaseOrchestrator):
             yield event
 
     def build_specialist_agents(self, user_token: str | None = None, raw_token: str | None = None) -> list:
-        """Instantiate and return the five domain specialist agents.
+        """Build specialist agents dynamically using the agent registry.
 
-        Security boundaries enforced here:
-        - portfolio_agent: receives raw_token for OBO exchange to Portfolio MCP;
-          falls back to X-User-Id + static token in dev mode.
-        - private_data_agent: receives raw_token for OBO exchange to Yahoo Finance MCP.
-        - github_intel_agent: receives per-user GitHub OAuth token (Pattern 2);
-          token was pre-fetched from Cosmos DB in run_handoff/run_comprehensive.
-          Degrades gracefully if user has not connected GitHub.
-        - market_intel_agent: Foundry Prompt Agent with Bing Grounding (public data only).
-        - economic_agent: public data via Alpha Vantage REST (no user data).
+        All agents registered via BaseAgent.__init_subclass__ are instantiated from
+        a single AgentBuildContext.  Adding a new specialist only requires:
+          1. Creating a new BaseAgent subclass in app/agents/
+          2. Implementing create_from_context(ctx) on it
+          3. Adding an import to app/agents/__init__.py
+
+        Agents that return None from create_from_context() are silently skipped
+        (e.g. esg_advisor_agent when ESG_ADVISOR_URL is not set in .env).
         """
-        from app.agents.economic_data import EconomicDataAgent
-        from app.agents.github_intel import GitHubIntelAgent
-        from app.agents.market_intel import MarketIntelAgent
-        from app.agents.portfolio_data import PortfolioDataAgent
-        from app.agents.private_data import PrivateDataAgent
+        import app.agents  # noqa: F401 -- side-effect: registers all agent classes
+        from app.core.agents.base import AgentBuildContext, BaseAgent
 
-        # GitHub token was pre-fetched in run_handoff/run_comprehensive
-        github_token = getattr(self, "_github_token", None)
+        ctx = AgentBuildContext(
+            client=self._client,
+            credential=self._credential,
+            settings=self._settings,
+            user_token=user_token,
+            raw_token=raw_token,
+            context_providers=[self._search_provider] if self._search_provider else None,
+            github_token=getattr(self, "_github_token", None),
+        )
 
-        return [
-            MarketIntelAgent.create(
-                self._settings,
-                self._credential,
-                context_providers=[self._search_provider] if self._search_provider else None,
-            ),
-            PortfolioDataAgent.create(
-                self._client,
-                portfolio_mcp_url=self._settings.portfolio_mcp_url,
-                user_token=user_token,
-                mcp_auth_token=self._settings.mcp_auth_token,
-                raw_token=raw_token,
-                settings=self._settings,
-            ),
-            EconomicDataAgent.create(
-                self._client,
-                alphavantage_api_key=self._settings.alphavantage_api_key,
-            ),
-            PrivateDataAgent.create(
-                self._client,
-                yahoo_mcp_url=self._settings.yahoo_mcp_url,
-                mcp_auth_token=self._settings.mcp_auth_token,
-                raw_token=raw_token,
-                settings=self._settings,
-            ),
-            GitHubIntelAgent.create(
-                self._client,
-                github_token=github_token,
-                settings=self._settings,
-            ),
+        agents = [
+            agent
+            for cls in BaseAgent.registered_agents().values()
+            if (agent := cls.create_from_context(ctx)) is not None
         ]
+        logger.info(
+            "build_specialist_agents: %d agents registered, %d instantiated: %s",
+            len(BaseAgent.registered_agents()),
+            len(agents),
+            [a.name for a in agents],
+        )
+        return agents
 
     def build_synthesis_agent(self):
         """Portfolio-specific synthesis agent with structured advisory output format."""
@@ -207,8 +193,9 @@ class PortfolioOrchestrator(BaseOrchestrator):
         1. Portfolio Snapshot (current positions and performance)
         2. Market Context (relevant news and analyst views)
         3. Macro Environment (economic indicators affecting the portfolio)
-        4. Key Risks and Opportunities
-        5. Actionable Recommendations (with specific rationale)
+        4. ESG & Sustainability Profile (ratings, carbon exposure, governance flags)
+        5. Key Risks and Opportunities
+        6. Actionable Recommendations (with specific rationale)
         """.strip()
 
         return Agent(client=self._client, name="synthesis_agent", instructions=instructions)

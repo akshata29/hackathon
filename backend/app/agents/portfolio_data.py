@@ -100,6 +100,19 @@ class PortfolioDataAgent(BaseAgent):
             )
         ]
 
+    @classmethod
+    def create_from_context(cls, ctx: "AgentBuildContext"):
+        """Registry hook — extract Portfolio MCP config and auth tokens from context."""
+        from app.core.agents.base import AgentBuildContext  # noqa: F401
+        return cls.create(
+            ctx.client,
+            portfolio_mcp_url=ctx.settings.portfolio_mcp_url,
+            user_token=ctx.user_token,
+            mcp_auth_token=ctx.settings.mcp_auth_token,
+            raw_token=ctx.raw_token,
+            settings=ctx.settings,
+        )
+
 
 def create_portfolio_agent(
     client,

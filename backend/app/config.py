@@ -104,6 +104,11 @@ class Settings(BaseSettings):
     # In production set this to your Static Web App URL.
     frontend_url: str = "http://localhost:5173"
 
+    # A2A agent URLs
+    # ESG Advisor: LangChain ReAct agent served via A2A protocol (a2a-agents/esg-advisor/)
+    # Leave empty to disable; the registry build loop skips None-returning agents.
+    esg_advisor_url: str = ""
+
     # ── GitHub OAuth App  (Pattern 2: vendor OAuth per-user token) ────────────
     # Create an OAuth App at: https://github.com/settings/developers
     # Homepage URL:  <your frontend URL>

@@ -263,3 +263,13 @@ class GitHubIntelAgent(BaseAgent):
             tools=tools,
             require_per_service_call_history_persistence=True,
         )
+
+    @classmethod
+    def create_from_context(cls, ctx: "AgentBuildContext"):
+        """Registry hook — extract pre-fetched GitHub token from context."""
+        from app.core.agents.base import AgentBuildContext  # noqa: F401
+        return cls.create(
+            ctx.client,
+            github_token=ctx.github_token,
+            settings=ctx.settings,
+        )

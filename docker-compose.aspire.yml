@@ -6,6 +6,21 @@ services:
       - "18888:18888"   # Browser UI  -> http://localhost:18888
       - "14317:18889"   # OTLP gRPC   -> OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:14317
     environment:
-      # Allow anonymous login in development — remove in shared environments
+      # Allow anonymous login in development -- remove in shared environments
       - DOTNET_DASHBOARD_UNSECURED_ALLOW_ANONYMOUS=true
     restart: unless-stopped
+
+  esg-advisor:
+    build:
+      context: ./a2a-agents/esg-advisor
+      dockerfile: Dockerfile
+    container_name: esg-advisor
+    ports:
+      - "8010:8010"     # A2A JSON-RPC endpoint -> http://localhost:8010
+    env_file:
+      - ./a2a-agents/esg-advisor/.env
+    environment:
+      - PORT=8010
+      - LOG_LEVEL=INFO
+    restart: unless-stopped
+    # Agent card is discoverable at: http://localhost:8010/.well-known/agent.json

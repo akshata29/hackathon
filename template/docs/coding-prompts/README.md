@@ -106,30 +106,153 @@ The system prompt (INSTRUCTIONS constant) should:
 
 ---
 
+## Step 2b — Add an A2A Remote Agent (LangChain / LangGraph)
+
+> **Goal**: Build a containerised LangChain agent that speaks the A2A protocol,
+> then integrate it into the orchestration workflow via the agent registry.
+> The backend never imports LangChain — it treats the A2A agent as a first-class peer.
+>
+> Reference implementation: `a2a-agents/esg-advisor/` and `backend/app/agents/esg_advisor.py`
+
+### Part 1 — Build the A2A server
+
+```
+I need to build a standalone A2A agent server for my application "<YOUR APP NAME>".
+
+The agent is called "<MY AGENT NAME>" and it:
+1. <describe what this agent's primary job is>
+2. <describe what external APIs / data sources it calls>
+3. <describe capabilities it should advertise in its agent card>
+
+Technology:
+- A2A protocol (a2a-sdk[http-server]>=0.3.23)
+- LangGraph ReAct pattern (create_react_agent from langgraph.prebuilt)
+- LLM: Azure OpenAI (primary) / OpenAI (fallback)
+
+Tools to implement:
+1. <tool_name>(<params>) — <what it does, what API it calls>
+2. <tool_name>(<params>) — <what it does>
+
+Tasks:
+1. Use the stub at template/a2a-agents/my-a2a-agent/server.py as the starting point.
+   Reference implementation: a2a-agents/esg-advisor/server.py
+
+2. Replace the placeholder @tool functions with real implementations that call
+   <your external API / data source>.
+   Each tool MUST have a complete docstring (it becomes the LLM function spec).
+
+3. Update SYSTEM_PROMPT to describe the agent's role and available tools.
+
+4. Update AGENT_CARD:
+   - name: "<MY AGENT NAME>"
+   - description: "<one-sentence description>"
+   - skills[]: one skill per major capability, with clear id/name/description
+
+5. The server runs on PORT env var (default 8010). It exposes:
+   POST /                        A2A JSON-RPC (called by A2AAgent in the backend)
+   GET  /.well-known/agent.json  Agent card
+
+6. Create requirements.txt based on template/a2a-agents/my-a2a-agent/requirements.txt.
+   Add any extra packages your tools need.
+
+7. Create Dockerfile based on template/a2a-agents/my-a2a-agent/Dockerfile.
+
+8. Create .env (copy template/a2a-agents/my-a2a-agent/.env.example) and fill in your
+   LLM credentials. DO NOT commit .env to git.
+
+Run locally with:
+  pip install -r requirements.txt
+  python server.py
+Verify: curl http://localhost:8010/.well-known/agent.json
+```
+
+### Part 2 — Register the A2A agent in the backend
+
+```
+I have a running A2A agent server at http://localhost:<PORT>.
+I need to integrate it into the backend using the agent registry pattern.
+
+Steps:
+
+1. Add a URL setting to backend/app/config.py:
+   my_agent_url: str = ""
+   # doc: "URL of the my-agent A2A server, e.g. http://localhost:8010"
+   Add the corresponding MY_AGENT_URL env var to backend/.env.
+
+2. Create backend/app/agents/my_agent.py as a BaseAgent subclass:
+
+   from agent_framework_a2a import A2AAgent
+   from app.core.agents.base import AgentBuildContext, BaseAgent
+
+   class MyAgent(BaseAgent):
+       name = "my_agent"
+       description = "<same description as the agent card>"
+
+       @classmethod
+       def create_from_context(cls, ctx: AgentBuildContext):
+           url = getattr(ctx.settings, "my_agent_url", "")
+           if not url:
+               return None   # graceful skip when URL is not configured
+           return A2AAgent(url=url, name=cls.name, description=cls.description)
+
+   Reference: backend/app/agents/esg_advisor.py
+
+3. Register the agent by adding ONE import to backend/app/agents/__init__.py:
+   from . import my_agent  # noqa: F401
+
+4. Update TRIAGE_INSTRUCTIONS in backend/app/workflows/workflow.py:
+   Add a routing rule:
+   - <describe user intent for this agent> -> my_agent
+
+5. Restart the backend. The new agent is automatically picked up by
+   build_specialist_agents() via the registry -- no other workflow changes needed.
+
+Test with: Ask a question that should route to my_agent. Confirm the request
+reaches the A2A server (check its logs).
+```
+
+---
+
 ## Step 3 — Wire Up the HandoffBuilder Workflow
 
 > **Goal**: Connect your agents into the orchestration workflow.
+> The workflow uses the **agent registry** — agents self-register via `create_from_context`.
+> You do NOT need to manually import each agent here; just update the triage instructions.
 
 ```
 I have built the following agents for my multi-agent app "<YOUR APP NAME>":
-<list each agent file and its create_ function>
+<list each file, e.g. backend/app/agents/agent_a.py, agent_b.py, my_a2a_agent.py>
 
-I need to wire them into the HandoffBuilder workflow in
+All agents are registered via their BaseAgent.create_from_context() classmethod and
+imported in backend/app/agents/__init__.py.
+
+I need to complete the HandoffBuilder workflow in
 `backend/app/workflows/workflow.py`.
 
 The triage agent should route based on these rules:
-- <intent category A> → <agent_a_name>
-- <intent category B> → <agent_b_name>
-- (optional) <intent category C> → <agent_c_name>
+- <intent category A> -> <agent_a name>
+- <intent category B> -> <agent_b name>
+- (optional) <intent category C> -> <a2a agent name>
 
 Multi-agent trigger: if the user asks for <describe when comprehensive analysis applies>
 the triage agent should respond with "COMPREHENSIVE_ANALYSIS_REQUESTED".
 
 Tasks:
-1. Update TRIAGE_INSTRUCTIONS with the routing rules above
-2. In run_handoff(), import and instantiate each agent using its create_ function
-3. Add each agent to HandoffBuilder with .add_agent()
-4. (Optional) Implement run_comprehensive() using ConcurrentBuilder that runs
+1. Update TRIAGE_INSTRUCTIONS with the routing rules above.
+   Keep SECURITY RULES and MULTI-AGENT TRIGGER sections unchanged.
+   The routing rule for each A2A agent must use the exact name= string from
+   its BaseAgent subclass (e.g. "my_agent").
+
+2. Verify that build_specialist_agents() already uses the registry pattern:
+     import app.agents          # side-effect: triggers registration
+     from app.core.agents.base import AgentBuildContext, BaseAgent
+     ctx = AgentBuildContext(client=..., settings=..., user_token=..., ...)
+     return [agent for cls in BaseAgent.registered_agents().values()
+             if (agent := cls.create_from_context(ctx)) is not None]
+   If the stub still contains raise NotImplementedError, replace it with
+   the pattern above (reference: backend/app/workflows/portfolio_workflow.py).
+
+3. (Optional) Implement run_comprehensive() using ConcurrentBuilder that runs
    all specialist agents in parallel, then synthesises with a summary agent.
    Reference: backend/app/workflows/portfolio_workflow.py run_comprehensive()
 
@@ -263,14 +386,25 @@ Task A — Update ChatPanel prompt groups:
   <Group 1>
     label: "<capability name>"
     badge: "<data source or mechanism>"
+    color: "text-<tailwind-color>-400"
     prompts: ["<question 1>", "<question 2>", "<question 3>"]
     requiresAuth: false
 
   <Group 2>
     label: "<capability name>"
     badge: "<data source>"
+    color: "text-<tailwind-color>-400"
     prompts: ["<question 1>", "<question 2>", "<question 3>"]
     requiresAuth: true   (if this capability uses confidential data)
+
+  If you added an A2A remote agent (Step 2b), also add a group for it:
+  <A2A Group>
+    label: "<A2A agent capability name>"
+    badge: "A2A / LangChain agent"
+    color: "text-lime-400"              (lime signals an external/remote agent)
+    prompts: ["<question 1>", "<question 2>", "<question 3>"]
+    requiresAuth: false
+  Reference: frontend/src/components/ChatPanel.tsx ESG Advisor group
 
   Also update:
   - The empty-state heading (currently "My App Assistant") to "<YOUR APP NAME>"

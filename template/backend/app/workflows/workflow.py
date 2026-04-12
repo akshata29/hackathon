@@ -4,7 +4,7 @@
 # Extend BaseOrchestrator to wire your specialist agents.
 # You only need to:
 #   1. Set the three class vars (triage_instructions, workflow_name, comprehensive_trigger)
-#   2. Implement build_specialist_agents() — return your domain agents
+#   2. Implement build_specialist_agents() using the agent registry
 #   3. Optionally override build_synthesis_agent() for a custom synthesis prompt
 #
 # BaseOrchestrator provides ALL infrastructure:
@@ -12,6 +12,13 @@
 #   - HandoffBuilder + ConcurrentBuilder wiring
 #   - SSE event streaming, triage buffering, comprehensive escalation
 #   - Token-budget compaction, Azure Monitor, AI Search context provider
+#
+# Agent Registry (dynamic discovery):
+#   Instead of hard-coding agent imports here, the build_specialist_agents()
+#   below imports app.agents (which registers all agent classes as a side-effect)
+#   and then calls BaseAgent.registered_agents() to build the participant list.
+#   To add a new agent: create app/agents/my_agent.py + add one import in
+#   app/agents/__init__.py.  No changes to this file are needed.
 #
 # Coding prompt: See template/docs/coding-prompts/README.md > Step 3
 # Example implementation: backend/app/workflows/portfolio_workflow.py
@@ -34,6 +41,7 @@ Your sole responsibility is to understand user intent and route to the appropria
 ROUTING RULES (one rule per specialist agent):
 - <intent category A> -> agent_a
 - <intent category B> -> agent_b
+- <ESG / sustainability / responsible investing> -> <your_esg_agent_name>  (if you add one)
 
 MULTI-AGENT TRIGGER:
 If the user asks for a comprehensive analysis requiring MULTIPLE data types,
@@ -58,33 +66,51 @@ class AppOrchestrator(BaseOrchestrator):
     workflow_name = "app_handoff_workflow"          # TODO: rename for your use-case
     comprehensive_trigger = "COMPREHENSIVE_ANALYSIS_REQUESTED"   # or "" to disable
 
-    def build_specialist_agents(self, user_token: str | None = None) -> list:
+    def build_specialist_agents(self, user_token: str | None = None, raw_token: str | None = None) -> list:
+        """Build specialist agents dynamically using the agent registry.
+
+        All agents registered via BaseAgent.__init_subclass__ are instantiated
+        from a single AgentBuildContext.  To add a new specialist:
+          1. Create app/agents/my_agent.py  (extend BaseAgent, implement create_from_context)
+          2. Add an import line in app/agents/__init__.py
+          No changes to this file are needed.
+
+        Agents that return None from create_from_context() are silently skipped
+        (e.g. an A2A agent when its URL is not set in .env).
         """
-        Instantiate and return your specialist agents.
+        import app.agents  # noqa: F401 -- side-effect: registers all agent classes
+        from app.core.agents.base import AgentBuildContext, BaseAgent
 
-        These are added after the triage agent in the HandoffBuilder participants list,
-        and used directly as ConcurrentBuilder participants.
+        ctx = AgentBuildContext(
+            client=self._client,
+            credential=self._credential,
+            settings=self._settings,
+            user_token=user_token,
+            raw_token=raw_token,
+            context_providers=[self._search_provider] if self._search_provider else None,
+            vendor_tokens={
+                # Populate per-user vendor OAuth tokens here if your workflow
+                # pre-fetches them (Pattern 2).  e.g.:
+                # "github": getattr(self, "_github_token", None),
+            },
+        )
 
-        Example:
-            from app.agents.agent_a import AgentA
-            from app.agents.agent_b import AgentB
-
-            return [
-                AgentA.create(self._client, mcp_url=self._settings.agent_a_mcp_url),
-                AgentB.create(self._client, api_key=self._settings.agent_b_api_key),
-            ]
-        """
-        # TODO: import and instantiate your domain agents
-        # from app.agents.agent_a import AgentA
-        # from app.agents.agent_b import AgentB
-        # return [
-        #     AgentA.create(self._client),
-        #     AgentB.create(self._client),
-        # ]
-        raise NotImplementedError("Override build_specialist_agents() in AppOrchestrator")
+        agents = [
+            agent
+            for cls in BaseAgent.registered_agents().values()
+            if (agent := cls.create_from_context(ctx)) is not None
+        ]
+        logger.info(
+            "build_specialist_agents: %d registered, %d instantiated: %s",
+            len(BaseAgent.registered_agents()),
+            len(agents),
+            [a.name for a in agents],
+        )
+        return agents
 
     # Optional: override build_synthesis_agent() for a domain-specific synthesis prompt
     # def build_synthesis_agent(self):
     #     from agent_framework import Agent
     #     return Agent(client=self._client, name="synthesis_agent", instructions="...")
+
 
