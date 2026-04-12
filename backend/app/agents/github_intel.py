@@ -53,18 +53,21 @@ def _build_github_rest_tools(github_token: str) -> list:
 
     async def get_org_repos(org: str, sort: str = "stars", per_page: int = 10) -> str:
         """List top public repositories for a GitHub organization sorted by stars or updated time."""
+        # Use the search API instead of /orgs/{org}/repos because many large organizations
+        # (e.g. microsoft, google, facebook) have OAuth App access restrictions that block
+        # the /orgs endpoint for third-party apps. The search API works on all public data.
         async with httpx.AsyncClient(headers=_headers, timeout=15) as client:
             resp = await client.get(
-                f"{_GITHUB_API_BASE}/orgs/{org}/repos",
-                params={"sort": sort, "per_page": per_page, "type": "public"},
+                f"{_GITHUB_API_BASE}/search/repositories",
+                params={"q": f"org:{org}", "sort": sort, "per_page": per_page, "order": "desc"},
             )
-            if resp.status_code == 404:
+            if resp.status_code == 422:
                 return f"Organization '{org}' not found on GitHub."
             if resp.status_code != 200:
                 return f"GitHub API error {resp.status_code}: {resp.text[:300]}"
-            repos = resp.json()
+            items = resp.json().get("items", [])
             fields = ("name", "stargazers_count", "forks_count", "open_issues_count", "pushed_at", "description")
-            return json.dumps([{k: r.get(k) for k in fields} for r in repos], indent=2)
+            return json.dumps([{k: r.get(k) for k in fields} for r in items], indent=2)
 
     async def get_repo_commits(owner: str, repo: str, per_page: int = 30) -> str:
         """Get recent commit activity for a specific repository."""

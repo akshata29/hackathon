@@ -1,16 +1,16 @@
 # ============================================================
 # Portfolio data API routes
-# Returns per-user portfolio data seeded deterministically from the user's identity.
-# The user identity is extracted from the validated Entra JWT (oid claim).
-# In production: replace _build_user_portfolio() with real Fabric/SQL query.
+# All data comes from the Portfolio MCP server — the single source of truth.
+# The same MCP server the chat agent uses, so dashboard and chat always agree.
 # ============================================================
 
+import json
 import logging
-import random
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app.core.auth.middleware import require_authenticated_user
 from app.config import Settings, get_settings
@@ -20,108 +20,127 @@ router = APIRouter()
 
 
 # ---------------------------------------------------------------------------
-# Deterministic per-user synthetic data
-# Uses the user's OID (stable Entra object ID) as the random seed so each
-# user always sees the same portfolio, but different from every other user.
+# MCP client helper
+# Calls a single tool on the Portfolio MCP server using the same auth
+# mechanism as PortfolioDataAgent (OBO in production, static bearer in dev).
 # ---------------------------------------------------------------------------
 
-_HOLDINGS_UNIVERSE = [
-    ("AAPL", "Apple Inc.", "Technology", 185.0),
-    ("MSFT", "Microsoft Corp.", "Technology", 415.0),
-    ("NVDA", "NVIDIA Corp.", "Technology", 875.0),
-    ("GOOGL", "Alphabet Inc.", "Technology", 165.0),
-    ("META", "Meta Platforms", "Technology", 520.0),
-    ("JPM", "JPMorgan Chase", "Financials", 198.0),
-    ("GS", "Goldman Sachs", "Financials", 478.0),
-    ("BRK.B", "Berkshire Hathaway B", "Financials", 368.0),
-    ("BLK", "BlackRock Inc.", "Financials", 890.0),
-    ("UNH", "UnitedHealth Group", "Healthcare", 490.0),
-    ("JNJ", "Johnson & Johnson", "Healthcare", 152.0),
-    ("LLY", "Eli Lilly", "Healthcare", 890.0),
-    ("XOM", "ExxonMobil", "Energy", 108.0),
-    ("CVX", "Chevron Corp.", "Energy", 155.0),
-    ("AMZN", "Amazon.com Inc.", "Consumer Discretionary", 185.0),
-    ("TSLA", "Tesla Inc.", "Consumer Discretionary", 250.0),
-]
+async def _call_portfolio_mcp_tool(
+    tool_name: str,
+    arguments: dict,
+    settings: Settings,
+    user_oid: str,
+    raw_token: str | None,
+) -> Any:
+    """
+    Call a Portfolio MCP tool and return the parsed result dict.
 
+    Auth (mirrors PortfolioDataAgent.build_tools):
+      Production: OBO token exchange via build_obo_http_client
+      Dev mode:   static bearer + X-User-Id header for row-level security
+    """
+    # Build request headers directly — avoids nested httpx context manager issues
+    # that cause empty SSE bodies when streaming inside client.stream().
+    req_headers: dict[str, str] = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+    }
 
-def _build_user_portfolio(user_id: str) -> dict[str, Any]:
-    rng = random.Random(hash(user_id) & 0xFFFFFFFF)
-    # Pick 8-12 holdings for this user
-    count = rng.randint(8, min(12, len(_HOLDINGS_UNIVERSE)))
-    chosen = rng.sample(_HOLDINGS_UNIVERSE, count)
+    has_entra = bool(
+        settings.entra_tenant_id
+        and settings.portfolio_mcp_client_id
+        and settings.entra_backend_client_id
+        and getattr(settings, "entra_client_secret", "")
+        and raw_token
+    )
 
-    holdings = []
-    total_value = 0.0
-    for sym, name, sector, base_price in chosen:
-        price = round(base_price * rng.uniform(0.85, 1.15), 2)
-        shares = rng.randint(20, 500)
-        value = round(price * shares, 2)
-        cost_basis = round(value * rng.uniform(0.65, 1.25), 2)
-        pnl = round(value - cost_basis, 2)
-        pnl_pct = round(pnl / max(cost_basis, 0.01) * 100, 2)
-        total_value += value
-        holdings.append({
-            "symbol": sym,
-            "name": name,
-            "sector": sector,
-            "shares": shares,
-            "current_price": price,
-            "market_value": value,
-            "unrealized_pnl": pnl,
-            "unrealized_pnl_pct": pnl_pct,
-            "weight_pct": 0.0,  # filled below
+    if has_entra:
+        # Production: get OBO token once, then use it directly
+        from app.core.auth.obo import OBOAuth
+        scope = f"api://{settings.portfolio_mcp_client_id}/portfolio.read"
+        obo = OBOAuth(
+            tenant_id=settings.entra_tenant_id,
+            client_id=settings.entra_backend_client_id,
+            client_secret=getattr(settings, "entra_client_secret", ""),
+            user_assertion=raw_token,
+            scope=scope,
+            fallback_bearer=settings.mcp_auth_token,
+        )
+        token = await obo._acquire()
+        req_headers["Authorization"] = f"Bearer {token}"
+    else:
+        # Dev mode: static bearer + X-User-Id for row-level security
+        req_headers["Authorization"] = f"Bearer {settings.mcp_auth_token}"
+        req_headers["X-User-Id"] = user_oid
+
+    endpoint = f"{settings.portfolio_mcp_url}/mcp"
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        # Step 1 — initialize; extract Mcp-Session-Id for the tools/call
+        init_resp = await client.post(endpoint, headers=req_headers, json={
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "portfolio-dashboard", "version": "1.0"},
+            },
         })
+        call_headers = dict(req_headers)
+        session_id = init_resp.headers.get("mcp-session-id") or init_resp.headers.get("Mcp-Session-Id")
+        if session_id:
+            call_headers["Mcp-Session-Id"] = session_id
 
-    for h in holdings:
-        h["weight_pct"] = round(h["market_value"] / total_value * 100, 2)
+        # Step 2 — tools/call; regular (non-streaming) post fully buffers the SSE body
+        tool_resp = await client.post(endpoint, headers=call_headers, json={
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": tool_name, "arguments": arguments},
+        })
+        if tool_resp.status_code != 200:
+            raise HTTPException(status_code=502, detail=f"Portfolio MCP error {tool_resp.status_code}")
+        raw_body = tool_resp.text.strip()
 
-    holdings.sort(key=lambda h: h["market_value"], reverse=True)
+    logger.debug("Portfolio MCP %s raw response: %r", tool_name, raw_body[:200])
 
-    # Sector allocation
-    sectors: dict[str, float] = {}
-    for h in holdings:
-        sectors[h["sector"]] = round(sectors.get(h["sector"], 0) + h["weight_pct"], 1)
+    # FastMCP returns SSE-framed body: "event: message\r\ndata: {...}\r\n\r\n"
+    body = raw_body
+    if "data:" in raw_body:
+        for line in raw_body.splitlines():
+            if line.strip().startswith("data:"):
+                body = line.strip()[len("data:"):].strip()
+                break
 
-    # Performance metrics — deterministic but varied per user
-    ytd = round(rng.uniform(-5.0, 28.0), 1)
-    sharpe = round(rng.uniform(0.6, 2.1), 2)
-    alpha = round(rng.uniform(-3.0, 6.0), 1)
-    beta = round(rng.uniform(0.75, 1.35), 2)
-    performance = {
-        "total_value": round(total_value, 2),
-        "ytd_return": ytd,
-        "one_year_return": round(ytd * rng.uniform(1.2, 1.8), 1),
-        "three_year_annualized": round(rng.uniform(6.0, 18.0), 1),
-        "benchmark": "S&P 500",
-        "benchmark_ytd": 12.1,
-        "alpha": alpha,
-        "beta": beta,
-        "sharpe_ratio": sharpe,
-        "max_drawdown": round(rng.uniform(-18.0, -3.0), 1),
-        "volatility": round(rng.uniform(10.0, 22.0), 1),
-    }
+    if not body:
+        logger.error("Empty body from Portfolio MCP for tool %s. Raw: %r", tool_name, raw_body[:200])
+        raise HTTPException(status_code=502, detail="Empty response from Portfolio MCP")
 
-    return {
-        "holdings": holdings,
-        "sectors": [{"sector": k, "weight": v} for k, v in sectors.items()],
-        "performance": performance,
-    }
+    rpc = json.loads(body)
+    if "error" in rpc:
+        raise HTTPException(status_code=502, detail=f"MCP tool error: {rpc['error']}")
+
+    # MCP tool result is in result.content[0].text as a JSON string
+    content = rpc.get("result", {}).get("content", [])
+    if content and content[0].get("type") == "text":
+        return json.loads(content[0]["text"])
+
+    return rpc.get("result", {})
 
 
 # ---------------------------------------------------------------------------
-# Routes — all require authentication
+# Routes — all require authentication; all delegate to the Portfolio MCP
 # ---------------------------------------------------------------------------
 
 @router.get("/holdings")
 async def get_holdings(
+    request: Request,
     user_claims: dict = Depends(require_authenticated_user),
     settings: Settings = Depends(get_settings),
 ) -> dict[str, Any]:
-    user_id = user_claims.get("oid") or user_claims.get("sub", "dev")
-    data = _build_user_portfolio(user_id)
+    user_oid = user_claims.get("oid") or user_claims.get("sub", "dev")
+    raw_token = request.headers.get("Authorization", "").removeprefix("Bearer ").strip() or None
+
+    data = await _call_portfolio_mcp_tool("get_holdings", {}, settings, user_oid, raw_token)
     return {
-        "holdings": data["holdings"],
+        "holdings": data.get("holdings", []),
         "user": user_claims.get("preferred_username") or user_claims.get("name", ""),
         "as_of": datetime.utcnow().isoformat(),
         "currency": "USD",
@@ -130,13 +149,28 @@ async def get_holdings(
 
 @router.get("/performance")
 async def get_performance(
+    request: Request,
     user_claims: dict = Depends(require_authenticated_user),
     settings: Settings = Depends(get_settings),
 ) -> dict[str, Any]:
-    user_id = user_claims.get("oid") or user_claims.get("sub", "dev")
-    data = _build_user_portfolio(user_id)
+    user_oid = user_claims.get("oid") or user_claims.get("sub", "dev")
+    raw_token = request.headers.get("Authorization", "").removeprefix("Bearer ").strip() or None
+
+    data = await _call_portfolio_mcp_tool("get_performance_summary", {}, settings, user_oid, raw_token)
+    # Normalise MCP field names to the shape the frontend expects
+    performance = {
+        "total_value": data.get("total_value", 0),
+        "ytd_return": data.get("ytd_return_pct", data.get("ytd_return", 0)),
+        "one_year_return": data.get("one_year_return_pct", data.get("one_year_return", 0)),
+        "three_year_annualized": data.get("three_year_annualized_pct", data.get("three_year_annualized", 0)),
+        "sharpe_ratio": data.get("sharpe_ratio", 0),
+        "alpha": data.get("alpha", 0),
+        "beta": data.get("beta", 1),
+        "max_drawdown": data.get("max_drawdown_pct", data.get("max_drawdown", 0)),
+        "volatility": data.get("volatility_pct", data.get("volatility", 0)),
+    }
     return {
-        "performance": data["performance"],
+        "performance": performance,
         "user": user_claims.get("preferred_username") or user_claims.get("name", ""),
         "as_of": datetime.utcnow().isoformat(),
     }
@@ -144,13 +178,22 @@ async def get_performance(
 
 @router.get("/sector-allocation")
 async def get_sector_allocation(
+    request: Request,
     user_claims: dict = Depends(require_authenticated_user),
     settings: Settings = Depends(get_settings),
 ) -> dict[str, Any]:
-    user_id = user_claims.get("oid") or user_claims.get("sub", "dev")
-    data = _build_user_portfolio(user_id)
+    user_oid = user_claims.get("oid") or user_claims.get("sub", "dev")
+    raw_token = request.headers.get("Authorization", "").removeprefix("Bearer ").strip() or None
+
+    data = await _call_portfolio_mcp_tool("get_allocation", {}, settings, user_oid, raw_token)
+    # MCP returns [{sector, weight_pct}]; frontend expects [{sector, weight}]
+    raw_alloc = data.get("sector_allocation", [])
+    allocations = [
+        {"sector": a["sector"], "weight": a.get("weight_pct", a.get("weight", 0))}
+        for a in raw_alloc
+    ]
     return {
-        "allocations": data["sectors"],
+        "allocations": allocations,
         "user": user_claims.get("preferred_username") or user_claims.get("name", ""),
         "as_of": datetime.utcnow().isoformat(),
     }
