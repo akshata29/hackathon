@@ -729,6 +729,9 @@ Sequence for a chat message that queries the portfolio agent in production:
 | API key for public MCPs | Backend env var / Key Vault, never in responses | `config.py` + Key Vault |
 | Dev mode bypass | Only when ENTRA_TENANT_ID is unset | `middleware.py` + `obo.py` |
 | Prompt injection guardrail | `check_user_message` before workflow | `core/guardrails/policy.py` |
+| MCP tool argument injection | Azure AI Content Safety on all string args | `mcp-servers/*/entra_auth.py` |
+| MCP per-tool audit trail | Structured JSON log per tool invocation | `mcp-servers/*/entra_auth.py` |
+| Supply chain vulnerabilities | Dependabot weekly scans (pip + npm) | `.github/dependabot.yml` |
 
 **Cross-user data access is structurally prevented**: the OBO token carries the oid claim;
 the MCP server uses it as the SQL WHERE clause parameter.  There is no code path that could
@@ -789,3 +792,196 @@ dev that is a fixed string, in production it is a cryptographically verified cla
 | `GITHUB_OAUTH_CLIENT_ID` | GitHub OAuth App client ID |
 | `GITHUB_OAUTH_CLIENT_SECRET` | GitHub OAuth App client secret (Key Vault in production) |
 | `GITHUB_OAUTH_REDIRECT_URI` | Callback URL registered in the GitHub OAuth App |
+
+### MCP security features
+
+| Variable | Description |
+|---|---|
+| `AZURE_CONTENT_SAFETY_ENDPOINT` | Azure AI Content Safety endpoint URL (omit to disable; safe to leave unset in dev) |
+| `TRUSTED_ISSUERS` | Comma-separated additional OIDC issuer URLs (e.g. Okta); Entra is always trusted |
+| `JWKS_CACHE_TTL` | JWKS key cache lifetime in seconds (default: `3600`) |
+
+---
+
+## 10. Per-Tool Audit Logging (MCP08)
+
+Every MCP tool invocation emits a structured JSON log entry at `INFO` level via the
+standard Python `logging` module.  The entry is written by `audit_log()` in
+`entra_auth.py` inside a `try/finally` block that executes even if the tool raises.
+
+### Log format
+
+```json
+{
+  "event": "mcp_tool_call",
+  "tool": "get_holdings",
+  "user_id": "alice@contoso.com",
+  "outcome": "success",
+  "duration_ms": 12.3
+}
+```
+
+| Field | Values | Notes |
+|---|---|---|
+| `event` | `"mcp_tool_call"` | Fixed — lets you filter MCP events from other log noise |
+| `tool` | tool function name | e.g. `"get_holdings"`, `"get_quote"` |
+| `user_id` / `caller_id` | oid, sub, or email | `user_id` in portfolio-db; `caller_id` in yahoo-finance |
+| `outcome` | `"success"` / `"error"` / `"denied"` | `"denied"` = scope check or content safety rejection |
+| `duration_ms` | float | Wall-clock ms from scope check to return / exception |
+| `error` | exception message | Present only when outcome is not `"success"` |
+
+### Tool instrumentation pattern
+
+```python
+# mcp-servers/portfolio-db/server.py  (same pattern in yahoo-finance)
+
+@mcp.tool()
+def get_holdings() -> dict:
+    user_id = _get_user_id_from_context()
+    _t0 = time.monotonic()
+    _outcome = "error"
+    _err: str | None = None
+    try:
+        check_scope("portfolio.read")
+        portfolio = _get_portfolio(user_id)
+        _outcome = "success"
+        return {"user_id": user_id, ...}
+    except PermissionError as exc:
+        _outcome = "denied"
+        _err = str(exc)
+        raise
+    except Exception as exc:
+        _err = str(exc)
+        raise
+    finally:
+        audit_log("get_holdings", user_id, _outcome,
+                  (time.monotonic() - _t0) * 1000, _err)
+```
+
+Key design decisions:
+- `user_id` is resolved *before* the try block so it is always available in `finally`,
+  even if `check_scope` raises.
+- `_outcome` defaults to `"error"`; it is set to `"success"` only at the last return, so
+  if a new code path is added without updating `_outcome` it will log conservatively.
+- `PermissionError` and `ValueError` (from `check_scope` / `_validate_symbol` /
+  `check_content_safety`) are caught separately and marked `"denied"`.
+
+### Routing to Azure Monitor
+
+Container Apps write stdout to Log Analytics automatically.  Query in Azure Monitor:
+
+```kusto
+ContainerAppConsoleLogs_CL
+| where ContainerName_s in ("portfolio-db-mcp", "yahoo-finance-mcp")
+| where Log_s contains "mcp_tool_call"
+| extend entry = parse_json(Log_s)
+| project TimeGenerated,
+          tool      = entry.tool,
+          user_id   = entry.user_id,
+          outcome   = entry.outcome,
+          duration  = entry.duration_ms,
+          error     = entry.error
+| order by TimeGenerated desc
+```
+
+---
+
+## 11. Prompt Injection Defense — Azure AI Content Safety (MCP06)
+
+The MCP tool functions accept string arguments supplied by an LLM.  A compromised or
+manipulated LLM could be induced to pass adversarial strings — such as embedded
+instructions — as tool arguments.  Azure AI Content Safety provides a semantic layer
+that detects such patterns before the argument reaches business logic.
+
+### How it works
+
+`check_content_safety(text)` in `entra_auth.py` is called on **every string argument**
+in every tool, *before* regex/whitelist validation:
+
+```python
+# mcp-servers/yahoo-finance/server.py
+
+@mcp.tool()
+def get_quote(symbol: str) -> dict:
+    ...
+    check_content_safety(symbol)   # semantic check  <-- NEW
+    symbol = _validate_symbol(symbol)   # format check
+    ...
+```
+
+The function:
+1. Resolves a module-level `ContentSafetyClient` on first call (lazy init, then cached).
+2. Calls `analyze_text()` from the `azure-ai-contentsafety` SDK.
+3. Raises `ValueError` if any category (Hate, SelfHarm, Sexual, Violence) is at
+   severity >= 4 (medium).
+4. **No-ops silently** if `AZURE_CONTENT_SAFETY_ENDPOINT` is not set — safe in dev.
+5. **Logs but does not block** on Content Safety API errors — availability of the safety
+   service is not a hard dependency.
+
+### Defense-in-depth layering
+
+```
+LLM argument
+    |
+    v (1) check_content_safety()  — semantic: detects injection, hate, violence
+    |
+    v (2) _validate_symbol()      — format: regex [A-Z0-9.\-\^=]{1,10}
+    |
+    v (3) parameterised SQL / yfinance — structural: no string interpolation
+    |
+    v (4) row-level security      — data: user_id == OBO identity
+```
+
+Even if Content Safety is disabled or skipped, layers 2-4 provide robust protection
+against injection for the current tool argument types.
+
+### Provisioning Content Safety
+
+```bicep
+// Add to infra/modules/ — example resource
+resource contentSafety 'Microsoft.CognitiveServices/accounts@2024-04-01-preview' = {
+  name: '${prefix}-content-safety'
+  location: location
+  kind: 'ContentSafety'
+  sku: { name: 'S0' }
+  identity: { type: 'SystemAssigned' }
+}
+```
+
+Set `AZURE_CONTENT_SAFETY_ENDPOINT` on each MCP Container App to
+`contentSafety.properties.endpoint`.  Both MCP servers use `DefaultAzureCredential` which
+resolves the Container App's managed identity automatically.
+
+---
+
+## 12. Supply Chain Security — Dependabot (MCP03/MCP04)
+
+`.github/dependabot.yml` configures weekly automated pull requests for all dependency
+manifests in the repository:
+
+| Ecosystem | Directory | Labels |
+|---|---|---|
+| `pip` | `/backend` | `dependencies`, `backend` |
+| `pip` | `/mcp-servers/portfolio-db` | `dependencies`, `mcp-portfolio` |
+| `pip` | `/mcp-servers/yahoo-finance` | `dependencies`, `mcp-yahoo` |
+| `pip` | `/a2a-agents/esg-advisor` | `dependencies`, `a2a-esg` |
+| `npm` | `/frontend` | `dependencies`, `frontend` |
+| `github-actions` | `/` | `dependencies`, `github-actions` |
+
+### Grouping strategy
+
+Related packages are grouped into single PRs to reduce noise:
+
+- `azure-*` packages in backend and MCP servers → one PR per service
+- React packages (react, react-*, @types/react*) → one PR
+- Vite packages (vite, @vitejs/*) → one PR
+- Tailwind packages → one PR
+
+### Enabling GitHub Advanced Security alerts
+
+For supply chain *vulnerability* alerts (not just version bumps), enable in
+**Settings → Code security and analysis**:
+
+- **Dependency graph** — required for Dependabot
+- **Dependabot alerts** — notifies on known CVEs
+- **Dependabot security updates** — auto-opens security PRs (independent of schedule)

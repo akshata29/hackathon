@@ -98,3 +98,20 @@ body {
 .prose-chat hr {
   @apply border-white/10 my-3;
 }
+
+/* ── Auth Flow Panel ── */
+.auth-flow-panel {
+  animation: flow-in 0.22s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+@keyframes flow-in {
+  from { opacity: 0; transform: translateY(-8px) scaleY(0.95); transform-origin: top; }
+  to   { opacity: 1; transform: translateY(0) scaleY(1); }
+}
+
+.flow-node {
+  transition: box-shadow 0.15s ease, transform 0.15s ease, ring 0.15s ease;
+}
+.flow-node:focus-visible {
+  outline: 2px solid rgba(99, 102, 241, 0.6);
+  outline-offset: 2px;
+}

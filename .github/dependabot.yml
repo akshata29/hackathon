@@ -1,0 +1,116 @@
+# Dependabot configuration — supply chain security (MCP03/MCP04)
+#
+# Monitors all Python dependency manifests in the repository and opens
+# automated pull requests when security advisories or newer compatible
+# versions are available.
+#
+# Reference:
+#   https://docs.github.com/en/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+
+version: 2
+
+updates:
+
+  # Backend FastAPI / agent-framework service
+  - package-ecosystem: "pip"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "08:00"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "backend"
+    groups:
+      azure-sdk:
+        patterns:
+          - "azure-*"
+      agent-framework:
+        patterns:
+          - "agent-framework*"
+
+  # Portfolio DB MCP server
+  - package-ecosystem: "pip"
+    directory: "/mcp-servers/portfolio-db"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "08:00"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "mcp-portfolio"
+    groups:
+      azure-sdk:
+        patterns:
+          - "azure-*"
+
+  # Yahoo Finance MCP server
+  - package-ecosystem: "pip"
+    directory: "/mcp-servers/yahoo-finance"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "08:00"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "mcp-yahoo"
+    groups:
+      azure-sdk:
+        patterns:
+          - "azure-*"
+
+  # ESG A2A agent
+  - package-ecosystem: "pip"
+    directory: "/a2a-agents/esg-advisor"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "08:00"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "a2a-esg"
+
+  # Frontend npm packages
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "08:00"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "frontend"
+    groups:
+      react:
+        patterns:
+          - "react"
+          - "react-*"
+          - "@types/react*"
+      vite:
+        patterns:
+          - "vite"
+          - "vite-*"
+          - "@vitejs/*"
+      tailwind:
+        patterns:
+          - "tailwindcss"
+          - "@tailwindcss/*"
+          - "postcss"
+          - "autoprefixer"
+
+  # GitHub Actions workflows (if any are added)
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "08:00"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "github-actions"

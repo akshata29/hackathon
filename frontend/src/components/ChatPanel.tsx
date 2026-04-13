@@ -6,6 +6,7 @@ import remarkGfm from 'remark-gfm'
 import { loginRequest, backendUrl } from '../authConfig'
 import { ChatMessage, StreamEvent, HandoffTrace, SessionSummary, Session } from '../types'
 import { AgentBadge } from './AgentBadge'
+import { AuthFlowPanel } from './AuthFlowPanel'
 
 function generateId() {
   return Math.random().toString(36).slice(2)
@@ -136,6 +137,7 @@ export function ChatPanel() {
   const [sessions, setSessions] = useState<SessionSummary[]>([])
   const [sessionsLoading, setSessionsLoading] = useState(false)
   const [sessionLoadingId, setSessionLoadingId] = useState<string | null>(null)
+  const [expandedFlows, setExpandedFlows] = useState<Set<string>>(new Set())
 
   const bottomRef = useRef<HTMLDivElement>(null)
   const isAuthenticated = useIsAuthenticated()
@@ -473,6 +475,34 @@ export function ChatPanel() {
                       <span className="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-bounce [animation-delay:300ms]" />
                     </span>
                   ) : null}
+                  {/* Security Trace toggle */}
+                  {msg.agent && (
+                    <div className="mt-3">
+                      <button
+                        onClick={() => setExpandedFlows((prev) => {
+                          const next = new Set(prev)
+                          if (next.has(msg.id)) next.delete(msg.id)
+                          else next.add(msg.id)
+                          return next
+                        })}
+                        className={`inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide px-2.5 py-1 rounded-lg border transition-all duration-150 ${
+                          expandedFlows.has(msg.id)
+                            ? 'bg-indigo-950 text-indigo-300 border-indigo-700/60 ring-1 ring-indigo-500/30'
+                            : 'text-gray-600 border-gray-700/40 hover:text-indigo-300 hover:border-indigo-700/50 hover:bg-indigo-950/40'
+                        }`}
+                      >
+                        <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75 11.25 15 15 9.75m-3-7.036A11.959 11.959 0 0 1 3.598 6 11.99 11.99 0 0 0 3 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285Z" />
+                        </svg>
+                        Security Trace
+                      </button>
+                      <AuthFlowPanel
+                        agent={msg.agent}
+                        open={expandedFlows.has(msg.id)}
+                        onClose={() => setExpandedFlows((prev) => { const next = new Set(prev); next.delete(msg.id); return next })}
+                      />
+                    </div>
+                  )}
                   {/* Divider between assistant turns */}
                   <div className="mt-4 border-b border-white/5" />
                 </div>

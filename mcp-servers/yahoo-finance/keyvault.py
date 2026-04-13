@@ -38,7 +38,14 @@ def get_mcp_auth_token() -> str:
         except Exception as exc:
             logger.warning("Key Vault fetch failed: %s — falling back to default token", exc)
 
-    # Last resort: generate a random token (insecure — dev only warning)
+    # Last resort: raise in production (ENTRA_TENANT_ID set); ephemeral token in dev only.
+    # An ephemeral random token would silently break auth in production environments.
+    if os.getenv("ENTRA_TENANT_ID"):
+        raise RuntimeError(
+            "MCP_AUTH_TOKEN is not set and Key Vault lookup failed. "
+            "Set the MCP_AUTH_TOKEN environment variable or configure AZURE_KEYVAULT_ENDPOINT "
+            "with a Managed Identity that has Key Vault Secrets User rights."
+        )
     import secrets as _secrets
     _cached_token = _secrets.token_urlsafe(32)
     logger.warning(

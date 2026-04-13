@@ -2,5 +2,6 @@ fastmcp>=2.0.0
 python-dotenv>=1.0.0
 azure-identity>=1.17.0
 azure-keyvault-secrets>=4.8.0
+azure-ai-contentsafety>=1.0.0
 python-jose[cryptography]>=3.3.0
 httpx>=0.28.0

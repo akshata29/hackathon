@@ -14,11 +14,22 @@
 
 import logging
 import os
+import re
 import sqlite3
+import time
 
 from fastmcp import FastMCP
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
-from entra_auth import EntraTokenVerifier, check_scope, get_user_id_from_request
+from entra_auth import (
+    EntraTokenVerifier,
+    MultiIDPTokenVerifier,
+    audit_log,
+    check_content_safety,
+    check_scope,
+    get_user_id_from_request,
+)
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
@@ -32,7 +43,7 @@ logger = logging.getLogger(__name__)
 # Dev mode (ENTRA_TENANT_ID not set): falls back to static MCP_AUTH_TOKEN
 # comparison inside EntraTokenVerifier.verify_token().
 # ---------------------------------------------------------------------------
-auth_provider = EntraTokenVerifier()
+auth_provider = MultiIDPTokenVerifier()
 
 mcp = FastMCP(
     name="portfolio-db-mcp",
@@ -46,8 +57,29 @@ mcp = FastMCP(
     auth=auth_provider,
 )
 
+
+# Health check endpoint (no auth required)
+@mcp.custom_route("/healthz", methods=["GET"])
+async def health(request: Request) -> JSONResponse:
+    return JSONResponse({"status": "ok", "service": "portfolio-db-mcp"})
+
 # Path to the seeded SQLite database.  Set DB_PATH to enable persistent RLS storage.
 DB_PATH = os.getenv("DB_PATH", "")
+
+# ---------------------------------------------------------------------------
+# Input validation helpers
+# ---------------------------------------------------------------------------
+
+# Valid ticker symbols: 1-10 uppercase alphanumeric chars plus . - ^ = (BRK.B, ^GSPC, etc.)
+_SYMBOL_RE = re.compile(r"^[A-Z0-9.\-\^=]{1,10}$")
+
+
+def _validate_symbol(symbol: str) -> str:
+    """Normalise and validate a ticker symbol. Raises ValueError on bad input."""
+    s = symbol.upper().strip()
+    if not _SYMBOL_RE.match(s):
+        raise ValueError(f"Invalid ticker symbol: {symbol!r}")
+    return s
 
 
 # ---------------------------------------------------------------------------
@@ -289,16 +321,30 @@ def get_holdings() -> dict:
         dict with list of holdings (symbol, name, sector, shares, current_price,
         market_value, unrealized_pnl, unrealized_pnl_pct, weight_pct) and total_value
     """
-    check_scope("portfolio.read")
     user_id = _get_user_id_from_context()
-    logger.info("get_holdings called for user: %s", user_id)
-    portfolio = _get_portfolio(user_id)
-    return {
-        "user_id": user_id,
-        "total_value": portfolio["total_value"],
-        "cash": portfolio["cash"],
-        "holdings": portfolio["holdings"],
-    }
+    _t0 = time.monotonic()
+    _outcome = "error"
+    _err: str | None = None
+    try:
+        check_scope("portfolio.read")
+        logger.info("get_holdings called for user: %s", user_id)
+        portfolio = _get_portfolio(user_id)
+        _outcome = "success"
+        return {
+            "user_id": user_id,
+            "total_value": portfolio["total_value"],
+            "cash": portfolio["cash"],
+            "holdings": portfolio["holdings"],
+        }
+    except PermissionError as exc:
+        _outcome = "denied"
+        _err = str(exc)
+        raise
+    except Exception as exc:
+        _err = str(exc)
+        raise
+    finally:
+        audit_log("get_holdings", user_id, _outcome, (time.monotonic() - _t0) * 1000, _err)
 
 
 @mcp.tool()
@@ -309,14 +355,28 @@ def get_allocation() -> dict:
     Returns:
         dict with sector_allocation list (sector, weight_pct) and total_value
     """
-    check_scope("portfolio.read")
     user_id = _get_user_id_from_context()
-    portfolio = _get_portfolio(user_id)
-    return {
-        "user_id": user_id,
-        "sector_allocation": portfolio["sector_allocation"],
-        "total_value": portfolio["total_value"],
-    }
+    _t0 = time.monotonic()
+    _outcome = "error"
+    _err: str | None = None
+    try:
+        check_scope("portfolio.read")
+        portfolio = _get_portfolio(user_id)
+        _outcome = "success"
+        return {
+            "user_id": user_id,
+            "sector_allocation": portfolio["sector_allocation"],
+            "total_value": portfolio["total_value"],
+        }
+    except PermissionError as exc:
+        _outcome = "denied"
+        _err = str(exc)
+        raise
+    except Exception as exc:
+        _err = str(exc)
+        raise
+    finally:
+        audit_log("get_allocation", user_id, _outcome, (time.monotonic() - _t0) * 1000, _err)
 
 
 @mcp.tool()
@@ -328,32 +388,47 @@ def get_performance_summary() -> dict:
         dict with ytd_return, one_year_return, benchmark comparison, Sharpe ratio,
         max_drawdown, and similar metrics
     """
-    check_scope("portfolio.read")
     user_id = _get_user_id_from_context()
-    portfolio = _get_portfolio(user_id)
+    _t0 = time.monotonic()
+    _outcome = "error"
+    _err: str | None = None
+    try:
+        check_scope("portfolio.read")
+        portfolio = _get_portfolio(user_id)
 
-    # Try SQLite performance record first
-    db_perf = _db_get_performance(user_id)
-    if db_perf:
-        db_perf.pop("user_id", None)
-        return {"user_id": user_id, "total_value": portfolio["total_value"], **db_perf}
+        # Try SQLite performance record first
+        db_perf = _db_get_performance(user_id)
+        if db_perf:
+            db_perf.pop("user_id", None)
+            _outcome = "success"
+            return {"user_id": user_id, "total_value": portfolio["total_value"], **db_perf}
 
-    # Fallback: use performance metrics already computed in _build_user_portfolio
-    perf = portfolio.get("performance", {})
-    return {
-        "user_id": user_id,
-        "total_value": portfolio["total_value"],
-        "ytd_return_pct": perf.get("ytd_return", 0.0),
-        "one_year_return_pct": perf.get("one_year_return", 0.0),
-        "three_year_annualized_pct": perf.get("three_year_annualized", 0.0),
-        "benchmark": perf.get("benchmark", "S&P 500"),
-        "benchmark_ytd_pct": perf.get("benchmark_ytd", 12.1),
-        "alpha": perf.get("alpha", 0.0),
-        "beta": perf.get("beta", 1.0),
-        "sharpe_ratio": perf.get("sharpe_ratio", 1.0),
-        "max_drawdown_pct": perf.get("max_drawdown", 0.0),
-        "volatility_pct": perf.get("volatility", 0.0),
-    }
+        # Fallback: use performance metrics already computed in _build_user_portfolio
+        perf = portfolio.get("performance", {})
+        _outcome = "success"
+        return {
+            "user_id": user_id,
+            "total_value": portfolio["total_value"],
+            "ytd_return_pct": perf.get("ytd_return", 0.0),
+            "one_year_return_pct": perf.get("one_year_return", 0.0),
+            "three_year_annualized_pct": perf.get("three_year_annualized", 0.0),
+            "benchmark": perf.get("benchmark", "S&P 500"),
+            "benchmark_ytd_pct": perf.get("benchmark_ytd", 12.1),
+            "alpha": perf.get("alpha", 0.0),
+            "beta": perf.get("beta", 1.0),
+            "sharpe_ratio": perf.get("sharpe_ratio", 1.0),
+            "max_drawdown_pct": perf.get("max_drawdown", 0.0),
+            "volatility_pct": perf.get("volatility", 0.0),
+        }
+    except PermissionError as exc:
+        _outcome = "denied"
+        _err = str(exc)
+        raise
+    except Exception as exc:
+        _err = str(exc)
+        raise
+    finally:
+        audit_log("get_performance_summary", user_id, _outcome, (time.monotonic() - _t0) * 1000, _err)
 
 
 @mcp.tool()
@@ -369,30 +444,49 @@ def get_transactions(symbol: str = "", limit: int = 20) -> dict:
         dict with transactions list, each entry has symbol, trade_date, trade_type,
         shares, price, total_amount
     """
-    check_scope("portfolio.read")
     user_id = _get_user_id_from_context()
-    limit = min(max(1, limit), 100)
-    rows = _db_get_transactions(user_id, symbol or None, limit)
-    if rows is not None:
-        return {"user_id": user_id, "count": len(rows), "transactions": rows}
-    # Fallback synthetic transactions
-    rng = _random.Random(_stable_seed(user_id + "txns"))
-    portfolio = _get_portfolio(user_id)
-    txns = []
-    from datetime import date, timedelta
-    for i, h in enumerate(portfolio["holdings"][:limit]):
-        if symbol and h["symbol"] != symbol.upper():
-            continue
-        td = (date(2024, 1, 2) + timedelta(days=i * 12)).isoformat()
-        txns.append({
-            "symbol": h["symbol"],
-            "trade_date": td,
-            "trade_type": "BUY",
-            "shares": h["shares"],
-            "price": round(h["avg_cost"], 2),
-            "total_amount": round(h["shares"] * h["avg_cost"], 2),
-        })
-    return {"user_id": user_id, "count": len(txns), "transactions": txns}
+    _t0 = time.monotonic()
+    _outcome = "error"
+    _err: str | None = None
+    try:
+        check_scope("portfolio.read")
+        if symbol:
+            check_content_safety(symbol)
+        limit = min(max(1, limit), 100)
+        if symbol:
+            symbol = _validate_symbol(symbol)
+        rows = _db_get_transactions(user_id, symbol or None, limit)
+        if rows is not None:
+            _outcome = "success"
+            return {"user_id": user_id, "count": len(rows), "transactions": rows}
+        # Fallback synthetic transactions
+        rng = _random.Random(_stable_seed(user_id + "txns"))
+        portfolio = _get_portfolio(user_id)
+        txns = []
+        from datetime import date, timedelta
+        for i, h in enumerate(portfolio["holdings"][:limit]):
+            if symbol and h["symbol"] != symbol.upper():
+                continue
+            td = (date(2024, 1, 2) + timedelta(days=i * 12)).isoformat()
+            txns.append({
+                "symbol": h["symbol"],
+                "trade_date": td,
+                "trade_type": "BUY",
+                "shares": h["shares"],
+                "price": round(h["avg_cost"], 2),
+                "total_amount": round(h["shares"] * h["avg_cost"], 2),
+            })
+        _outcome = "success"
+        return {"user_id": user_id, "count": len(txns), "transactions": txns}
+    except (PermissionError, ValueError) as exc:
+        _outcome = "denied"
+        _err = str(exc)
+        raise
+    except Exception as exc:
+        _err = str(exc)
+        raise
+    finally:
+        audit_log("get_transactions", user_id, _outcome, (time.monotonic() - _t0) * 1000, _err)
 
 
 @mcp.tool()
@@ -406,14 +500,30 @@ def get_holding_detail(symbol: str) -> dict:
     Returns:
         dict with full holding details or error if symbol not held
     """
-    check_scope("portfolio.read")
     user_id = _get_user_id_from_context()
-    symbol = symbol.upper().strip()
-    portfolio = _get_portfolio(user_id)
-    for h in portfolio["holdings"]:
-        if h["symbol"] == symbol:
-            return {"user_id": user_id, **h}
-    return {"user_id": user_id, "symbol": symbol, "error": f"Symbol {symbol} not found in portfolio"}
+    _t0 = time.monotonic()
+    _outcome = "error"
+    _err: str | None = None
+    try:
+        check_scope("portfolio.read")
+        check_content_safety(symbol)
+        symbol = _validate_symbol(symbol)
+        portfolio = _get_portfolio(user_id)
+        for h in portfolio["holdings"]:
+            if h["symbol"] == symbol:
+                _outcome = "success"
+                return {"user_id": user_id, **h}
+        _outcome = "success"
+        return {"user_id": user_id, "symbol": symbol, "error": f"Symbol {symbol} not found in portfolio"}
+    except (PermissionError, ValueError) as exc:
+        _outcome = "denied"
+        _err = str(exc)
+        raise
+    except Exception as exc:
+        _err = str(exc)
+        raise
+    finally:
+        audit_log("get_holding_detail", user_id, _outcome, (time.monotonic() - _t0) * 1000, _err)
 
 
 @mcp.tool()
@@ -427,28 +537,43 @@ def get_rebalancing_suggestions(target_tech_weight: float = 30.0) -> dict:
     Returns:
         dict with current vs target allocations and suggested trades
     """
-    check_scope("portfolio.read")
     user_id = _get_user_id_from_context()
-    portfolio = _get_portfolio(user_id)
-    current_tech = sum(
-        h["weight_pct"] for h in portfolio["holdings"] if h["sector"] == "Technology"
-    )
-    delta = target_tech_weight - current_tech
-    direction = "reduce" if delta < 0 else "increase"
-    return {
-        "user_id": user_id,
-        "current_tech_weight_pct": round(current_tech, 2),
-        "target_tech_weight_pct": target_tech_weight,
-        "delta_pct": round(delta, 2),
-        "suggestion": (
-            f"{direction.capitalize()} Technology exposure by {abs(delta):.1f}% "
-            f"to reach {target_tech_weight}% target."
-        ),
-        "disclaimer": (
-            "This is a model simulation only. Consult a licensed financial advisor "
-            "before making any investment decisions."
-        ),
-    }
+    _t0 = time.monotonic()
+    _outcome = "error"
+    _err: str | None = None
+    try:
+        check_scope("portfolio.read")
+        target_tech_weight = max(0.0, min(100.0, target_tech_weight))
+        portfolio = _get_portfolio(user_id)
+        current_tech = sum(
+            h["weight_pct"] for h in portfolio["holdings"] if h["sector"] == "Technology"
+        )
+        delta = target_tech_weight - current_tech
+        direction = "reduce" if delta < 0 else "increase"
+        _outcome = "success"
+        return {
+            "user_id": user_id,
+            "current_tech_weight_pct": round(current_tech, 2),
+            "target_tech_weight_pct": target_tech_weight,
+            "delta_pct": round(delta, 2),
+            "suggestion": (
+                f"{direction.capitalize()} Technology exposure by {abs(delta):.1f}% "
+                f"to reach {target_tech_weight}% target."
+            ),
+            "disclaimer": (
+                "This is a model simulation only. Consult a licensed financial advisor "
+                "before making any investment decisions."
+            ),
+        }
+    except PermissionError as exc:
+        _outcome = "denied"
+        _err = str(exc)
+        raise
+    except Exception as exc:
+        _err = str(exc)
+        raise
+    finally:
+        audit_log("get_rebalancing_suggestions", user_id, _outcome, (time.monotonic() - _t0) * 1000, _err)
 
 
 if __name__ == "__main__":
@@ -467,4 +592,4 @@ if __name__ == "__main__":
         asyncio.get_event_loop().set_exception_handler(_suppress_connection_reset)
 
     port = int(os.getenv("PORT", "8002"))
-    uvicorn.run(mcp.http_app(), host="0.0.0.0", port=port)
+    uvicorn.run(mcp.http_app(stateless_http=True), host="0.0.0.0", port=port)

@@ -10,12 +10,23 @@
 
 import logging
 import os
+import re
+import time
 from functools import lru_cache
 
 import yfinance as yf
 from fastmcp import FastMCP
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
-from entra_auth import EntraTokenVerifier, check_scope
+from entra_auth import (
+    EntraTokenVerifier,
+    MultiIDPTokenVerifier,
+    audit_log,
+    check_content_safety,
+    check_scope,
+    get_caller_id,
+)
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
@@ -26,7 +37,7 @@ logger = logging.getLogger(__name__)
 # Production (ENTRA_TENANT_ID set): validates OBO JWT (audience=api://<MCP_CLIENT_ID>).
 # Dev mode: falls back to static MCP_AUTH_TOKEN comparison.
 # ---------------------------------------------------------------------------
-auth_provider = EntraTokenVerifier()
+auth_provider = MultiIDPTokenVerifier()
 
 mcp = FastMCP(
     name="yahoo-finance-mcp",
@@ -38,6 +49,31 @@ mcp = FastMCP(
     ),
     auth=auth_provider,
 )
+
+
+# Health check endpoint (no auth required)
+@mcp.custom_route("/healthz", methods=["GET"])
+async def health(request: Request) -> JSONResponse:
+    return JSONResponse({"status": "ok", "service": "yahoo-finance-mcp"})
+
+
+# ---------------------------------------------------------------------------
+# Input validation helpers
+# ---------------------------------------------------------------------------
+
+_SYMBOL_RE = re.compile(r"^[A-Z0-9.\-\^=]{1,10}$")
+_VALID_METRICS = frozenset({
+    "pe_ratio", "forward_pe", "peg_ratio", "price_to_book",
+    "return_on_equity", "debt_to_equity", "profit_margins",
+})
+
+
+def _validate_symbol(symbol: str) -> str:
+    """Normalise and validate a ticker symbol. Raises ValueError on bad input."""
+    s = symbol.upper().strip()
+    if not _SYMBOL_RE.match(s):
+        raise ValueError(f"Invalid ticker symbol: {symbol!r}")
+    return s
 
 
 # ---------------------------------------------------------------------------
@@ -56,11 +92,17 @@ def get_quote(symbol: str) -> dict:
     Returns:
         dict with price, change, change_pct, volume, market_cap, pe_ratio, week_52_high, week_52_low
     """
-    check_scope("market.read")
-    symbol = symbol.upper().strip()
+    caller_id = get_caller_id()
+    _t0 = time.monotonic()
+    _outcome = "error"
+    _err: str | None = None
     try:
+        check_scope("market.read")
+        check_content_safety(symbol)
+        symbol = _validate_symbol(symbol)
         ticker = yf.Ticker(symbol)
         info = ticker.fast_info
+        _outcome = "success"
         return {
             "symbol": symbol,
             "price": round(float(info.last_price or 0), 2),
@@ -75,9 +117,16 @@ def get_quote(symbol: str) -> dict:
             "fifty_two_week_high": round(float(info.year_high or 0), 2),
             "fifty_two_week_low": round(float(info.year_low or 0), 2),
         }
+    except (PermissionError, ValueError) as exc:
+        _outcome = "denied"
+        _err = str(exc)
+        raise
     except Exception as exc:
+        _err = str(exc)
         logger.warning("get_quote failed for %s: %s", symbol, exc)
         return {"symbol": symbol, "error": str(exc)}
+    finally:
+        audit_log("get_quote", caller_id, _outcome, (time.monotonic() - _t0) * 1000, _err)
 
 
 @mcp.tool()
@@ -92,10 +141,16 @@ def get_financials(symbol: str) -> dict:
         dict with pe_ratio, forward_pe, peg_ratio, price_to_book, revenue_growth,
         earnings_growth, return_on_equity, debt_to_equity, free_cash_flow_yield
     """
-    check_scope("market.read")
-    symbol = symbol.upper().strip()
+    caller_id = get_caller_id()
+    _t0 = time.monotonic()
+    _outcome = "error"
+    _err: str | None = None
     try:
+        check_scope("market.read")
+        check_content_safety(symbol)
+        symbol = _validate_symbol(symbol)
         info = yf.Ticker(symbol).info
+        _outcome = "success"
         return {
             "symbol": symbol,
             "pe_ratio": info.get("trailingPE"),
@@ -115,9 +170,16 @@ def get_financials(symbol: str) -> dict:
             "sector": info.get("sector"),
             "industry": info.get("industry"),
         }
+    except (PermissionError, ValueError) as exc:
+        _outcome = "denied"
+        _err = str(exc)
+        raise
     except Exception as exc:
+        _err = str(exc)
         logger.warning("get_financials failed for %s: %s", symbol, exc)
         return {"symbol": symbol, "error": str(exc)}
+    finally:
+        audit_log("get_financials", caller_id, _outcome, (time.monotonic() - _t0) * 1000, _err)
 
 
 @mcp.tool()
@@ -132,10 +194,15 @@ def get_news(symbol: str, max_items: int = 5) -> list[dict]:
     Returns:
         list of dicts with title, publisher, link, published_at
     """
-    check_scope("market.read")
-    symbol = symbol.upper().strip()
-    max_items = min(max(1, max_items), 10)
+    caller_id = get_caller_id()
+    _t0 = time.monotonic()
+    _outcome = "error"
+    _err: str | None = None
     try:
+        check_scope("market.read")
+        check_content_safety(symbol)
+        symbol = _validate_symbol(symbol)
+        max_items = min(max(1, max_items), 10)
         ticker = yf.Ticker(symbol)
         news = ticker.news or []
         results = []
@@ -148,10 +215,18 @@ def get_news(symbol: str, max_items: int = 5) -> list[dict]:
                 "published_at": content.get("pubDate") or item.get("providerPublishTime", ""),
                 "summary": content.get("summary", ""),
             })
+        _outcome = "success"
         return results
+    except (PermissionError, ValueError) as exc:
+        _outcome = "denied"
+        _err = str(exc)
+        raise
     except Exception as exc:
+        _err = str(exc)
         logger.warning("get_news failed for %s: %s", symbol, exc)
         return [{"symbol": symbol, "error": str(exc)}]
+    finally:
+        audit_log("get_news", caller_id, _outcome, (time.monotonic() - _t0) * 1000, _err)
 
 
 @mcp.tool()
@@ -165,10 +240,16 @@ def get_analyst_ratings(symbol: str) -> dict:
     Returns:
         dict with recommendation, number_of_analysts, mean_target_price, high_target, low_target
     """
-    check_scope("market.read")
-    symbol = symbol.upper().strip()
+    caller_id = get_caller_id()
+    _t0 = time.monotonic()
+    _outcome = "error"
+    _err: str | None = None
     try:
+        check_scope("market.read")
+        check_content_safety(symbol)
+        symbol = _validate_symbol(symbol)
         info = yf.Ticker(symbol).info
+        _outcome = "success"
         return {
             "symbol": symbol,
             "recommendation": info.get("recommendationKey"),
@@ -179,9 +260,16 @@ def get_analyst_ratings(symbol: str) -> dict:
             "target_low_price": info.get("targetLowPrice"),
             "target_median_price": info.get("targetMedianPrice"),
         }
+    except (PermissionError, ValueError) as exc:
+        _outcome = "denied"
+        _err = str(exc)
+        raise
     except Exception as exc:
+        _err = str(exc)
         logger.warning("get_analyst_ratings failed for %s: %s", symbol, exc)
         return {"symbol": symbol, "error": str(exc)}
+    finally:
+        audit_log("get_analyst_ratings", caller_id, _outcome, (time.monotonic() - _t0) * 1000, _err)
 
 
 @mcp.tool()
@@ -197,26 +285,46 @@ def compare_stocks(symbols: list[str], metric: str = "pe_ratio") -> list[dict]:
     Returns:
         Sorted list of dicts with symbol and metric value
     """
-    check_scope("market.read")
-    symbols = [s.upper().strip() for s in symbols[:5]]
-    metric_map = {
-        "pe_ratio": "trailingPE",
-        "forward_pe": "forwardPE",
-        "peg_ratio": "pegRatio",
-        "price_to_book": "priceToBook",
-        "return_on_equity": "returnOnEquity",
-        "debt_to_equity": "debtToEquity",
-        "profit_margins": "profitMargins",
-    }
-    yf_key = metric_map.get(metric, "trailingPE")
-    results = []
-    for sym in symbols:
-        try:
-            val = yf.Ticker(sym).info.get(yf_key)
-            results.append({"symbol": sym, metric: val})
-        except Exception as exc:
-            results.append({"symbol": sym, metric: None, "error": str(exc)})
-    return sorted(results, key=lambda x: (x[metric] is None, x[metric]))
+    caller_id = get_caller_id()
+    _t0 = time.monotonic()
+    _outcome = "error"
+    _err: str | None = None
+    try:
+        check_scope("market.read")
+        for s in symbols[:5]:
+            check_content_safety(s)
+        check_content_safety(metric)
+        symbols = [_validate_symbol(s) for s in symbols[:5]]
+        if metric not in _VALID_METRICS:
+            raise ValueError(f"Invalid metric {metric!r}. Choose from: {sorted(_VALID_METRICS)}")
+        metric_map = {
+            "pe_ratio": "trailingPE",
+            "forward_pe": "forwardPE",
+            "peg_ratio": "pegRatio",
+            "price_to_book": "priceToBook",
+            "return_on_equity": "returnOnEquity",
+            "debt_to_equity": "debtToEquity",
+            "profit_margins": "profitMargins",
+        }
+        yf_key = metric_map.get(metric, "trailingPE")
+        results = []
+        for sym in symbols:
+            try:
+                val = yf.Ticker(sym).info.get(yf_key)
+                results.append({"symbol": sym, metric: val})
+            except Exception as exc:
+                results.append({"symbol": sym, metric: None, "error": str(exc)})
+        _outcome = "success"
+        return sorted(results, key=lambda x: (x[metric] is None, x[metric]))
+    except (PermissionError, ValueError) as exc:
+        _outcome = "denied"
+        _err = str(exc)
+        raise
+    except Exception as exc:
+        _err = str(exc)
+        raise
+    finally:
+        audit_log("compare_stocks", caller_id, _outcome, (time.monotonic() - _t0) * 1000, _err)
 
 
 if __name__ == "__main__":
@@ -235,4 +343,4 @@ if __name__ == "__main__":
         asyncio.get_event_loop().set_exception_handler(_suppress_connection_reset)
 
     port = int(os.getenv("PORT", "8001"))
-    uvicorn.run(mcp.http_app(), host="0.0.0.0", port=port)
+    uvicorn.run(mcp.http_app(stateless_http=True), host="0.0.0.0", port=port)

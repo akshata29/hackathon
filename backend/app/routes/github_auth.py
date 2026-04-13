@@ -26,10 +26,12 @@
 #   - Token is never returned to the frontend; it lives only in Cosmos DB.
 # ============================================================
 
+import base64
 import hashlib
 import hmac
 import json
 import logging
+import secrets
 import time
 from urllib.parse import urlencode
 
@@ -51,19 +53,35 @@ _GITHUB_SCOPES = "public_repo read:user"
 
 
 # ─────────────────────────────────────────────────────────────────────
+# PKCE helpers (RFC 7636 / S256 method)
+# ─────────────────────────────────────────────────────────────────────
+
+def _generate_pkce() -> tuple[str, str]:
+    """Return (code_verifier, code_challenge) using the S256 method.
+
+    code_verifier:  43-128 URL-safe base64 characters (no padding)
+    code_challenge: base64url(SHA-256(code_verifier)) — no padding
+    """
+    code_verifier = base64.urlsafe_b64encode(secrets.token_bytes(48)).rstrip(b"=").decode()
+    digest = hashlib.sha256(code_verifier.encode()).digest()
+    code_challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+    return code_verifier, code_challenge
+
+
+# ─────────────────────────────────────────────────────────────────────
 # State parameter helpers (HMAC-signed to prevent CSRF)
 # ─────────────────────────────────────────────────────────────────────
 
-def _make_state(user_oid: str, secret: str) -> str:
-    """Encode user_oid + timestamp in a self-contained HMAC-signed state token."""
-    payload = json.dumps({"oid": user_oid, "ts": int(time.time())})
+def _make_state(user_oid: str, secret: str, code_verifier: str = "") -> str:
+    """Encode user_oid + timestamp + PKCE code_verifier in a self-contained HMAC-signed state token."""
+    payload = json.dumps({"oid": user_oid, "ts": int(time.time()), "cv": code_verifier})
     sig = hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
     # Base64-free: encode as <payload_hex>.<sig>
     return f"{payload.encode().hex()}.{sig}"
 
 
-def _verify_state(state: str, secret: str, max_age_seconds: int = 600) -> str:
-    """Verify and decode; returns user_oid or raises HTTPException."""
+def _verify_state(state: str, secret: str, max_age_seconds: int = 600) -> tuple[str, str]:
+    """Verify and decode; returns (user_oid, code_verifier) or raises HTTPException."""
     try:
         hex_payload, sig = state.split(".", 1)
         payload_bytes = bytes.fromhex(hex_payload)
@@ -73,7 +91,7 @@ def _verify_state(state: str, secret: str, max_age_seconds: int = 600) -> str:
         data = json.loads(payload_bytes)
         if int(time.time()) - data["ts"] > max_age_seconds:
             raise HTTPException(status_code=400, detail="OAuth state expired")
-        return data["oid"]
+        return data["oid"], data.get("cv", "")
     except HTTPException:
         raise
     except Exception as exc:
@@ -105,12 +123,15 @@ async def github_oauth_initiate(
     # the chat endpoint uses when looking up the token. Access tokens for
     # custom API audiences may omit preferred_username, causing a mismatch.
     user_oid = auth.claims.get("oid") or auth.user_id
-    state = _make_state(user_oid, settings.github_oauth_client_secret)
+    code_verifier, code_challenge = _generate_pkce()
+    state = _make_state(user_oid, settings.github_oauth_client_secret, code_verifier)
     params = {
         "client_id": settings.github_oauth_client_id,
         "redirect_uri": settings.github_oauth_redirect_uri,
         "scope": _GITHUB_SCOPES,
         "state": state,
+        "code_challenge": code_challenge,
+        "code_challenge_method": "S256",
     }
     auth_url = f"{_GITHUB_OAUTH_AUTHORIZE_URL}?{urlencode(params)}"
     return JSONResponse({"auth_url": auth_url})
@@ -129,19 +150,22 @@ async def github_oauth_callback(
     if not settings.github_oauth_client_id:
         raise HTTPException(status_code=501, detail="GitHub OAuth not configured")
 
-    # Verify CSRF state and recover user_oid
-    user_oid = _verify_state(state, settings.github_oauth_client_secret)
+    # Verify CSRF state and recover user_oid + PKCE code_verifier
+    user_oid, code_verifier = _verify_state(state, settings.github_oauth_client_secret)
 
     # Exchange code -> access_token with GitHub
     async with httpx.AsyncClient(timeout=15) as client:
+        exchange_data: dict = {
+            "client_id": settings.github_oauth_client_id,
+            "client_secret": settings.github_oauth_client_secret,
+            "code": code,
+            "redirect_uri": settings.github_oauth_redirect_uri,
+        }
+        if code_verifier:
+            exchange_data["code_verifier"] = code_verifier
         resp = await client.post(
             _GITHUB_OAUTH_TOKEN_URL,
-            data={
-                "client_id": settings.github_oauth_client_id,
-                "client_secret": settings.github_oauth_client_secret,
-                "code": code,
-                "redirect_uri": settings.github_oauth_redirect_uri,
-            },
+            data=exchange_data,
             headers={"Accept": "application/json"},
         )
         resp.raise_for_status()

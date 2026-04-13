@@ -100,9 +100,14 @@ class Settings(BaseSettings):
     # Leave empty to skip Bing grounding (market_intel_agent falls back to model knowledge).
     bing_connection_id: str = ""
 
-    # Frontend origin — used for post-OAuth redirects back to the SPA.
-    # In production set this to your Static Web App URL.
+    # Frontend origin — used for CORS and post-OAuth redirects back to the SPA.
+    # In production set this to your Static Web App URL (e.g. https://xxx.azurestaticapps.net).
     frontend_url: str = "http://localhost:5173"
+
+    # Additional CORS allowed origins — comma-separated.
+    # frontend_url above is always included. Add staging/preview URLs here.
+    # e.g. "https://staging.myapp.com,https://preview.myapp.com"
+    allowed_cors_origins: str = ""
 
     # A2A agent URLs
     # ESG Advisor: LangChain ReAct agent served via A2A protocol (a2a-agents/esg-advisor/)

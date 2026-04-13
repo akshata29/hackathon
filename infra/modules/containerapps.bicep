@@ -29,6 +29,7 @@ param entraBackendClientId string = ''
 param portfolioMcpClientId string = ''
 param yahooMcpClientId string = ''
 // Key Vault URI for the backend client secret (used for OBO exchange)
+@secure()
 param entraClientSecretKvUri string = ''
 
 var backendAppName = 'ca-backend-${resourceToken}'
@@ -202,12 +203,8 @@ resource backendApp 'Microsoft.App/containerApps@2024-03-01' = {
         external: true
         targetPort: 8000
         transport: 'http'
-        corsPolicy: {
-          allowedOrigins: ['*']
-          allowedMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS']
-          allowedHeaders: ['*']
-          allowCredentials: false
-        }
+        // CORS is handled by FastAPI CORSMiddleware with specific allowed origins.
+        // Do not set a wildcard corsPolicy here — it would conflict with allow_credentials=true.
       }
       registries: [
         {
@@ -328,3 +325,96 @@ resource backendApp 'Microsoft.App/containerApps@2024-03-01' = {
 output backendUrl string = 'https://${backendApp.properties.configuration.ingress.fqdn}'
 output yahooMcpUrl string = 'https://${yahooMcpApp.properties.configuration.ingress.fqdn}'
 output portfolioMcpUrl string = 'https://${portfolioMcpApp.properties.configuration.ingress.fqdn}'
+
+// ──────────────────────────────────────────────────
+// EasyAuth — Container Apps built-in token validation
+// Defense-in-depth: validates Entra tokens at the
+// platform layer before requests reach app code.
+// Conditionally enabled when entraTenantId is provided.
+// ──────────────────────────────────────────────────
+
+// Yahoo Finance MCP — strict (internal service, always requires valid token)
+resource yahooMcpEasyAuth 'Microsoft.App/containerApps/authConfigs@2024-03-01' = if (entraTenantId != '' && yahooMcpClientId != '') {
+  parent: yahooMcpApp
+  name: 'current'
+  properties: {
+    globalValidation: {
+      unauthenticatedClientAction: 'Return401'
+    }
+    identityProviders: {
+      azureActiveDirectory: {
+        enabled: true
+        registration: {
+          openIdIssuer: '${environment().authentication.loginEndpoint}${entraTenantId}/v2.0'
+          clientId: yahooMcpClientId
+        }
+        validation: {
+          allowedAudiences: [
+            'api://${yahooMcpClientId}'
+          ]
+        }
+      }
+    }
+    platform: {
+      enabled: true
+    }
+  }
+}
+
+// Portfolio DB MCP — strict (internal service, always requires valid token)
+resource portfolioMcpEasyAuth 'Microsoft.App/containerApps/authConfigs@2024-03-01' = if (entraTenantId != '' && portfolioMcpClientId != '') {
+  parent: portfolioMcpApp
+  name: 'current'
+  properties: {
+    globalValidation: {
+      unauthenticatedClientAction: 'Return401'
+    }
+    identityProviders: {
+      azureActiveDirectory: {
+        enabled: true
+        registration: {
+          openIdIssuer: '${environment().authentication.loginEndpoint}${entraTenantId}/v2.0'
+          clientId: portfolioMcpClientId
+        }
+        validation: {
+          allowedAudiences: [
+            'api://${portfolioMcpClientId}'
+          ]
+        }
+      }
+    }
+    platform: {
+      enabled: true
+    }
+  }
+}
+
+// Backend API — permissive (AllowAnonymous) so the GitHub OAuth callback
+// redirect (no Bearer token) is not blocked by the platform layer.
+// The FastAPI Entra middleware still enforces auth on all API routes.
+resource backendEasyAuth 'Microsoft.App/containerApps/authConfigs@2024-03-01' = if (entraTenantId != '' && entraBackendClientId != '') {
+  parent: backendApp
+  name: 'current'
+  properties: {
+    globalValidation: {
+      unauthenticatedClientAction: 'AllowAnonymous'
+    }
+    identityProviders: {
+      azureActiveDirectory: {
+        enabled: true
+        registration: {
+          openIdIssuer: '${environment().authentication.loginEndpoint}${entraTenantId}/v2.0'
+          clientId: entraBackendClientId
+        }
+        validation: {
+          allowedAudiences: [
+            'api://${entraBackendClientId}'
+          ]
+        }
+      }
+    }
+    platform: {
+      enabled: true
+    }
+  }
+}
