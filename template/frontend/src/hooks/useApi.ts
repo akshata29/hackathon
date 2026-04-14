@@ -1,5 +1,5 @@
 import { useMsal } from '@azure/msal-react'
-import { loginRequest, backendUrl } from '../authConfig'
+import { tokenRequest, backendUrl } from '../authConfig'
 
 export function useApiToken() {
   const { instance, accounts } = useMsal()
@@ -8,7 +8,7 @@ export function useApiToken() {
     if (!accounts.length) return null
     try {
       const result = await instance.acquireTokenSilent({
-        ...loginRequest,
+        ...tokenRequest,
         account: accounts[0],
       })
       return result.accessToken

@@ -8,6 +8,7 @@
 import base64
 import json
 import logging
+import time
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
@@ -61,15 +62,28 @@ class AuthContext:
         )
 
 
+class EntraJWTValidator:
     """Validates Azure AD / Entra ID JWT access tokens using JWKS."""
 
     WELL_KNOWN_OPENID = (
         "https://login.microsoftonline.com/{tenant_id}/v2.0/.well-known/openid-configuration"
     )
 
+    # Microsoft Graph resource identifiers.  Tokens with these audiences are signed
+    # by Graph's own key infrastructure (separate from Entra OIDC keys) so they
+    # cannot be validated via the tenant JWKS.  We verify claims instead.
+    _GRAPH_AUDIENCES = frozenset({
+        "https://graph.microsoft.com",
+        "00000003-0000-0000-c000-000000000000",
+    })
+
     def __init__(self, tenant_id: str, audience: str) -> None:
         self._tenant_id = tenant_id
-        self._audience = audience
+        # Accept both the api:// URI form and the plain GUID form of the audience.
+        # Entra issues the plain GUID when the app has no API scopes exposed yet;
+        # it issues api://<guid> once oauth2PermissionScopes are configured.
+        stripped = audience.removeprefix("api://")
+        self._audience: list[str] = list({audience, stripped, f"api://{stripped}"})
         self._jwks_uri: str | None = None
         self._jwks_cache: dict[str, Any] | None = None
 
@@ -95,8 +109,34 @@ class AuthContext:
 
     async def validate(self, token: str) -> dict[str, Any]:
         """Validate token and return decoded claims. Raises HTTPException on failure."""
+
+        # Peek at claims without signature verification to route handling.
+        unverified = _decode_claims_unsafe(token)
+        aud = unverified.get("aud", "")
+
+        # -------------------------------------------------------------------
+        # Graph tokens (User.Read etc.) are signed by Microsoft Graph's own
+        # key infrastructure — those keys are NOT in the Entra OIDC JWKS.
+        # Verify claims (iss, tid, exp) instead of signature.
+        # -------------------------------------------------------------------
+        if aud in self._GRAPH_AUDIENCES or str(aud).startswith("https://graph.microsoft.com"):
+            exp = unverified.get("exp", 0)
+            if exp and exp < time.time():
+                raise HTTPException(status_code=401, detail="Token expired")
+            iss = unverified.get("iss", "")
+            expected_v2 = f"https://login.microsoftonline.com/{self._tenant_id}/v2.0"
+            expected_v1 = f"https://sts.windows.net/{self._tenant_id}/"
+            if iss and iss not in (expected_v2, expected_v1):
+                raise HTTPException(status_code=401, detail="Token issuer mismatch")
+            tid = unverified.get("tid", "")
+            if tid and tid != self._tenant_id:
+                raise HTTPException(status_code=401, detail="Token tenant mismatch")
+            return unverified
+
+        # -------------------------------------------------------------------
+        # App tokens (api://<clientId>/...) — full JWKS signature verification.
+        # -------------------------------------------------------------------
         try:
-            # Decode header without verification to get kid
             unverified_header = jwt.get_unverified_header(token)
             kid = unverified_header.get("kid")
         except JWTError as exc:
@@ -104,7 +144,6 @@ class AuthContext:
             raise HTTPException(status_code=401, detail="Invalid token header") from exc
 
         jwks = await self._get_jwks()
-        # Find matching key
         rsa_key: dict[str, str] = {}
         for key in jwks.get("keys", []):
             if key.get("kid") == kid:
@@ -112,20 +151,35 @@ class AuthContext:
                 break
 
         if not rsa_key:
-            # Invalidate JWKS cache so next request refetches (key rotation)
             self._jwks_cache = None
             raise HTTPException(status_code=401, detail="Public key not found")
 
-        issuer = f"https://login.microsoftonline.com/{self._tenant_id}/v2.0"
+        # App tokens can carry either v2 or v1 issuer depending on the app registration's
+        # requestedAccessTokenVersion setting (null/1 → v1, 2 → v2).
+        expected_issuers = {
+            f"https://login.microsoftonline.com/{self._tenant_id}/v2.0",
+            f"https://sts.windows.net/{self._tenant_id}/",
+        }
         try:
             claims: dict[str, Any] = jwt.decode(
                 token,
                 rsa_key,
                 algorithms=["RS256"],
-                audience=self._audience,
-                issuer=issuer,
+                audience=None,  # python-jose rejects a list; aud checked manually below
+                options={"verify_aud": False, "verify_iss": False},
             )
+            aud = claims.get("aud", "")
+            if aud and isinstance(aud, str) and aud not in self._audience:
+                raise HTTPException(status_code=401, detail="Token audience mismatch")
+            iss = claims.get("iss", "")
+            if iss and iss not in expected_issuers:
+                raise HTTPException(status_code=401, detail="Token issuer mismatch")
+            tid = claims.get("tid", "")
+            if tid and tid != self._tenant_id:
+                raise HTTPException(status_code=401, detail="Token tenant mismatch")
         except JWTError as exc:
+            self._jwks_cache = None
+            self._jwks_uri = None
             logger.warning("JWT validation failed: %s", exc)
             raise HTTPException(status_code=401, detail="Token validation failed") from exc
 

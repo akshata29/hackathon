@@ -69,6 +69,28 @@ class Settings(BaseSettings):
         """JWT audience = the backend API app registration client ID."""
         return self.entra_backend_client_id
 
+    # Frontend origin — used for CORS and post-OAuth redirects back to the SPA.
+    # In production set this to your Static Web App URL.
+    frontend_url: str = "http://localhost:5173"
+
+    # Additional CORS allowed origins — comma-separated.
+    # frontend_url above is always included. Add staging/preview URLs here.
+    allowed_cors_origins: str = ""
+
+    # ── GitHub OAuth App  (Pattern 2: vendor OAuth per-user token) ────────────
+    # Create an OAuth App at: https://github.com/settings/developers
+    # Homepage URL:  <your frontend URL>
+    # Callback URL:  <backend URL>/api/auth/github/callback
+    github_oauth_client_id: str = ""
+    github_oauth_client_secret: str = ""   # Store in Key Vault in production
+    github_oauth_redirect_uri: str = "http://localhost:8000/api/auth/github/callback"
+
+    # Demo / Cross-IDP mode helpers (local dev only)
+    # mock_oidc_url: URL of the mock Okta-like OIDC server (Option B/C demos)
+    # okta_proxy_url: URL of the Okta->MCP proxy for Option C demo
+    mock_oidc_url: str = "http://localhost:8889"
+    okta_proxy_url: str = "http://localhost:8003"
+
     # ==================================================================
     # DOMAIN-SPECIFIC SETTINGS
     # Replace everything below with your own configuration variables.
@@ -92,6 +114,9 @@ class Settings(BaseSettings):
     # TODO: Add Foundry agent names that your setup-foundry.py creates
     # agent_a_name: str = "my-app-agent-a"
     # agent_b_name: str = "my-app-agent-b"
+
+    # TODO: Add A2A remote agent URLs (leave empty to disable)
+    # my_a2a_agent_url: str = ""
 
 
 @lru_cache

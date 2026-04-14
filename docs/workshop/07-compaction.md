@@ -16,9 +16,13 @@ Harden your application before deploying it to Azure:
 
 ### Authentication Flow
 
+**Option A — Entra OBO (production default)**
+
 ```
 Browser (MSAL)
   -- acquires Bearer JWT from Entra ID (your tenant)
+  -- uses tokenRequest: { scopes: ['api://<clientId>/Chat.Read'] }
+     (NOT loginRequest -- separate token for API calls)
   |
   v
 FastAPI Backend (app/core/auth/middleware.py)
@@ -26,22 +30,53 @@ FastAPI Backend (app/core/auth/middleware.py)
      - Fetches JWKS from login.microsoftonline.com/{tenant_id}
      - Matches JWT kid to correct public key
      - Verifies RS256 signature, audience, issuer, expiry
-     - Returns user OID (object ID)
+     - Returns AuthContext { user_id, raw_token }
   |
   v
 Chat Route (app/routes/chat.py)
-  -- extracts user_id = token.sub (or token.oid)
-  -- passes user_id to CONFIDENTIAL agents as user_token
+  -- auth: AuthContext = Depends(require_auth_context)
+  -- passes auth.raw_token to build_specialist_agents(..., raw_token=...)
   |
   v
-CONFIDENTIAL Agent
-  -- passes user_token as X-User-Id header to MCP server
-  -- MCP server enforces row-level data isolation
+Workflow  ->  CONFIDENTIAL Agent
+  -- MCPStreamableHTTPTool headers: { Authorization: Bearer <raw_token> }
+  -- raw_token is an Entra OBO token scoped to the MCP server
+  |
+  v
+MCP Server (entra_auth.py)
+  -- EntraTokenVerifier validates the OBO token
+  -- get_user_id_from_request() extracts user_id from JWT claims
+  -- check_scope() enforces required scopes
+  -- audit_log() records every tool call
+  -- row-level security: all queries filtered by user_id
 ```
 
-**Important**: When `ENTRA_TENANT_ID` is not set (local dev), JWT validation is skipped
-with a warning. This is intentional to allow local development without Entra setup.
+**Option B — Multi-IDP** (accepts tokens from a second IdP, e.g. Okta):
+- MCP server uses `MultiIDPTokenVerifier` instead of `EntraTokenVerifier`
+- `TRUSTED_ISSUERS` env var lists additional OIDC issuer URLs
+- All other security controls (scope check, row-level, audit) remain the same
+- Run `mcp-servers/mock-oidc/server.py` locally to simulate an additional IdP
+
+**Option C — Identity Proxy**:
+- `mcp-servers/okta-proxy/server.py` proxies calls, swapping an external token for
+  an Entra token that the production MCP server can validate
+- Useful when a partner system already has Okta tokens and can't issue Entra tokens
+
+**Important**: When `ENTRA_TENANT_ID` is not set (local dev), JWT validation falls back
+to comparing the static `MCP_AUTH_TOKEN`. This is intentional for local development.
 In production (Container Apps), `ENTRA_TENANT_ID` is always configured.
+
+### MSAL Frontend: tokenRequest vs loginRequest
+
+The frontend uses **two separate token requests**:
+
+| Token | Scopes | Used for |
+|-------|--------|----------|
+| `loginRequest` | `openid profile email User.Read` | Sign-in / user display |
+| `tokenRequest` | `api://<clientId>/Chat.Read` | All backend API calls |
+
+Always use `tokenRequest` (not `loginRequest`) when calling `/api/*` endpoints.
+This is already wired in `authConfig.ts` and `useApi.ts`.
 
 ### Managed Identity — No Stored Credentials
 
@@ -103,22 +138,18 @@ All three should return HTTP 400.
 
 ### Test 2 — Row-Level Security (if you have a CONFIDENTIAL agent)
 
-Send the same data query with two different user contexts.
-Confirm the responses contain different (isolated) data:
+In production, user identity comes from the validated JWT inside the MCP server
+(`get_user_id_from_request()`). To verify isolation locally using the dev fallback:
 
-```powershell
-# This only applies if your backend supports X-User-Id bypass in dev mode
-# In production, user_id comes from the validated JWT
-$body1 = @{ message = "<query for your confidential data>"; session_id = "user-a-test" } | ConvertTo-Json
-$body2 = @{ message = "<same query>"; session_id = "user-b-test" } | ConvertTo-Json
+1. Start the MCP server with `MCP_AUTH_TOKEN=dev-token` (no `ENTRA_TENANT_ID` set)
+2. Send two requests with the same static token -- both map to `"dev-user"` in dev mode
+3. For true multi-user isolation testing, either:
+   - Set `ENTRA_TENANT_ID` and use real Entra OBO tokens for two different users, or
+   - Use the seed data scripts to populate data for multiple synthetic users and
+     call the MCP server directly with their respective OBO tokens after login
 
-$resp1 = Invoke-RestMethod -Method POST -Uri "http://localhost:8000/api/chat/message" `
-    -ContentType "application/json" -Body $body1
-$resp2 = Invoke-RestMethod -Method POST -Uri "http://localhost:8000/api/chat/message" `
-    -ContentType "application/json" -Body $body2
-
-# Responses should differ — different user, different data
-```
+For basic integration testing, log in with two different Entra accounts in the frontend
+and submit the same confidential query -- confirm each user sees only their own data.
 
 ---
 

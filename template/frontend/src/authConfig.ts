@@ -25,11 +25,21 @@ export const msalConfig: Configuration = {
   },
 }
 
-// Scopes for sign-in (openid profile gives us the ID token / user info)
-// Chat.Read scope requires the API to be explicitly exposed in the app registration;
-// omit it here for local dev — the backend skips JWT validation when ENTRA_TENANT_ID is blank
+// Scopes for sign-in — Chat.Read is the delegated permission on the backend API.
+// Including it here means MSAL acquires the backend-scoped access token at login,
+// so acquireTokenSilent(tokenRequest) always hits cache on subsequent calls.
+// openid/profile/email are OIDC scopes that produce the ID token (for display name/username).
+// NOTE: User.Read (Graph resource) is intentionally omitted — mixing resources in one
+// loginRequest is rejected by MSAL. User display info comes from the ID token instead.
 export const loginRequest = {
-  scopes: ['openid', 'profile', 'email'],
+  scopes: ['openid', 'profile', 'email', `api://${import.meta.env.VITE_ENTRA_CLIENT_ID || 'dev-client-id'}/Chat.Read`],
+}
+
+// Scopes for backend API calls — same resource as loginRequest so the token is
+// always available from MSAL cache without an extra network round-trip.
+// Token issued with aud=api://<clientId>, usable as an OBO assertion by the backend.
+export const tokenRequest = {
+  scopes: [`api://${import.meta.env.VITE_ENTRA_CLIENT_ID || 'dev-client-id'}/Chat.Read`],
 }
 
 export const backendUrl =

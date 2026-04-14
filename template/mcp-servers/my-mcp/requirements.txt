@@ -1,6 +1,8 @@
 fastmcp>=2.0.0
 uvicorn[standard]>=0.32.0
 httpx>=0.28.0
+python-dotenv>=1.0.0
+python-jose[cryptography]>=3.3.0
 azure-keyvault-secrets>=4.9.0
 azure-identity>=1.21.0
 # TODO: add data-access libraries your MCP server needs

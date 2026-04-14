@@ -276,25 +276,75 @@ The server provides access to: <describe your data source>
 Data classification: CONFIDENTIAL | PUBLIC
 
 The server should expose these tools:
-1. <tool_name>(<params>) — <what it does>, returns <return type/shape>
-2. <tool_name>(<params>) — <what it does>, returns <return type/shape>
-3. (optional) <tool_name>(<params>) — <what it does>
+1. <tool_name>(<params>) -- <what it does>, returns <return type/shape>
+2. <tool_name>(<params>) -- <what it does>, returns <return type/shape>
+3. (optional) <tool_name>(<params>) -- <what it does>
 
 Data access:
 - Data is stored in: <SQLite / PostgreSQL / REST API / Azure SQL / Cosmos DB>
 - Connection details come from environment variables: <list env vars>
 
 Security requirements:
-- Bearer token authentication (use FastMCP StaticTokenVerifier)
-- Row-level security: each tool must accept a user_id parameter and filter
-  results to only that user's data (use the X-User-Id header pattern from
-  mcp-servers/portfolio-db/server.py)
+- Bearer token authentication using EntraTokenVerifier from entra_auth.py
+  (production: validates Entra OBO JWT; dev: falls back to static MCP_AUTH_TOKEN)
+- Row-level security: call get_user_id_from_request() inside each tool to get the
+  authenticated caller's stable ID, then filter all queries by that user_id
+- Scope enforcement: call check_scope("my-resource.read") at the start of each tool
+  that handles CONFIDENTIAL data
+- Audit logging: wrap every tool with audit_log(tool, user_id, outcome, duration_ms)
 
-Create the server at `mcp-servers/<my-server-name>/server.py`.
-Follow the same pattern as `mcp-servers/portfolio-db/server.py`.
+Multi-IDP support (optional):
+- If the server needs to accept tokens from a non-Entra identity provider
+  (e.g. Okta), use MultiIDPTokenVerifier instead of EntraTokenVerifier.
+  Set the TRUSTED_ISSUERS environment variable to a comma-separated list of
+  additional OIDC issuer URLs.
+
+Create the server at mcp-servers/<my-server-name>/server.py.
+Start from the template at template/mcp-servers/my-mcp/server.py.
+Also copy template/mcp-servers/my-mcp/entra_auth.py and requirements.txt.
 
 Each tool must have a complete docstring because FastMCP sends the docstring
 as the tool description to the language model.
+
+Reference implementations:
+  mcp-servers/portfolio-db/server.py   (confidential, row-level security, full auth)
+  mcp-servers/yahoo-finance/server.py  (semi-public, bearer token auth, scope check)
+```
+
+---
+
+## Step 4b -- Enable Multi-IDP Auth on Your MCP Server (Option B)
+
+> **Goal**: Allow the MCP server to accept tokens from a second identity provider
+> (e.g. Okta, a corporate SSO system) in addition to Entra.
+> Use this when your enterprise has users in multiple IdPs and all need to call the same MCP server.
+
+```
+I have an existing private MCP server at mcp-servers/<my-server-name>/server.py.
+I want to enable multi-IDP token validation so it can accept:
+  1. Entra ID OBO tokens (existing production flow)
+  2. Tokens from: <describe the additional IdP, e.g. "Okta authorization server", "mock OIDC server">
+     Issuer URL: <e.g. https://dev-xxxxx.okta.com or http://localhost:8888>
+
+Steps:
+1. In server.py, replace:
+     auth_provider = EntraTokenVerifier()
+   with:
+     auth_provider = MultiIDPTokenVerifier()
+
+2. Set the TRUSTED_ISSUERS environment variable:
+     TRUSTED_ISSUERS=<issuer URL>
+
+3. The MCP_CLIENT_ID audience check still applies for all IdPs.
+   Tokens from <IdP name> must be issued with audience = api://<MCP_CLIENT_ID>.
+
+4. Add TRUSTED_ISSUERS to .env.example with a comment explaining each issuer.
+
+5. Test with both token types:
+   - Entra OBO token (existing backend flow)
+   - Token from <IdP name> (use the /token endpoint of the mock OIDC server if testing locally)
+
+Reference: mcp-servers/portfolio-db/entra_auth.py -- MultiIDPTokenVerifier class
 ```
 
 ---

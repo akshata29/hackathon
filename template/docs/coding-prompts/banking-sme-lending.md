@@ -373,8 +373,14 @@ Part A: Core Banking MCP Server
     get_decision_reasons(application_id: str) -> list[str]
 
   Security:
-    Bearer token: StaticTokenVerifier from MCP_AUTH_TOKEN env var
-    Row-level: filter by user_id from X-User-Id header; reject "anonymous"
+    Bearer token: EntraTokenVerifier from entra_auth.py
+      - Production: validates Entra OBO JWT (JWKS fetched from Entra) 
+      - Dev fallback: static MCP_AUTH_TOKEN env var when ENTRA_TENANT_ID is unset
+    Row-level: call get_user_id_from_request() inside each tool; filter all queries
+      by that user_id; raise PermissionError if user_id is "anonymous"
+    Scope: call check_scope("core-banking.read") in every confidential tool
+    Audit: wrap each tool with audit_log(tool_name, user_id, outcome, duration_ms)
+    Copy entra_auth.py from template/mcp-servers/my-mcp/entra_auth.py
 
   Also create mcp-servers/core-banking/requirements.txt and Dockerfile.
   Follow mcp-servers/portfolio-db/server.py as the reference.

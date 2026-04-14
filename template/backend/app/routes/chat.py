@@ -1,8 +1,8 @@
 # ============================================================
-# Chat API routes — TEMPLATE VERSION
+# Chat API routes -- TEMPLATE VERSION
 # Supports:
-#   - POST /api/chat/message — single-turn (returns SSE stream)
-#   - WebSocket /api/chat/ws/{session_id} — persistent chat session
+#   - POST /api/chat/message -- single-turn (returns SSE stream)
+#   - WebSocket /api/chat/ws/{session_id} -- persistent chat session
 #
 # ONLY CHANGE: replace AppOrchestrator import below with your orchestrator.
 # Everything else (SSE streaming, session persistence, auth extraction)
@@ -30,50 +30,38 @@ from app.workflows.workflow import AppOrchestrator
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+_VALID_DEMO_MODES = {"entra", "multi-idp", "okta-proxy"}
+
 
 class ChatRequest(BaseModel):
     message: str
     session_id: str | None = None
     mode: str = "handoff"  # "handoff" | "comprehensive"
+    # demo_mode controls which auth path the backend uses to reach MCP servers:
+    #   "entra"      -- default; Entra OBO token exchange (production flow)
+    #   "multi-idp"  -- Option B; backend presents a mock Okta JWT directly to MCP
+    #                   (MCP uses MultiIDPTokenVerifier to validate both Entra + extra IdPs)
+    #   "okta-proxy" -- Option C; calls routed through an identity-proxy (token swap)
+    demo_mode: str = "entra"
 
-
-def _get_user_id(authorization: str | None = Header(default=None)) -> str:
-    """
-    Extract user ID from the Entra Bearer token.
-    Falls back to 'anonymous' in development when no auth is configured.
-    In production: validate the JWT via app.core.auth.middleware.require_authenticated_user.
-    """
-    if not authorization or not authorization.startswith("Bearer "):
-        logger.warning("No Bearer token — using anonymous user. Configure ENTRA_CLIENT_ID for production.")
-        return "anonymous"
-
-    token = authorization.removeprefix("Bearer ")
-    try:
-        import base64
-        parts = token.split(".")
-        if len(parts) >= 2:
-            payload = json.loads(base64.urlsafe_b64decode(parts[1] + "=="))
-            return (
-                payload.get("preferred_username")
-                or payload.get("oid")
-                or payload.get("sub")
-                or "anonymous"
-            )
-    except Exception:
-        pass
-    return "anonymous"
+    def model_post_init(self, __context) -> None:
+        if self.demo_mode not in _VALID_DEMO_MODES:
+            self.demo_mode = "entra"
 
 
 @router.post("/message")
 async def chat_message(
     request: ChatRequest,
     settings: Settings = Depends(get_settings),
-    user_id: str = Depends(_get_user_id),
+    auth: AuthContext = Depends(require_auth_context),
 ):
     """
-    Single-turn chat endpoint — SSE stream response.
+    Single-turn chat endpoint -- SSE stream response.
     Messages are persisted to CosmosDB for authenticated users.
     """
+    user_id = auth.user_id
+    raw_token = auth.raw_token
+
     policy = check_user_message(request.message)
     if not policy.allowed:
         raise HTTPException(status_code=400, detail=policy.reason)
@@ -93,7 +81,7 @@ async def chat_message(
             if existing:
                 prior_messages = existing.get("messages", [])
             else:
-                await store.create_session(session_id, user_id, title)
+                await store.create_session(session_id, user_id, title, demo_mode=request.demo_mode)
             await store.append_message(session_id, user_id, "user", request.message)
         except Exception as exc:
             logger.warning("Failed to persist user message to CosmosDB: %s", exc)
@@ -103,6 +91,7 @@ async def chat_message(
         accumulated_agent: str | None = None
         accumulated_traces: list = []
 
+        # Send session ID first so the client can persist it
         yield f"data: {json.dumps({'type': 'session', 'session_id': session_id})}\n\n"
 
         try:
@@ -114,6 +103,7 @@ async def chat_message(
                         user_token=user_id,
                         raw_token=raw_token,
                         history=prior_messages or None,
+                        demo_mode=request.demo_mode,
                     )
                 else:
                     gen = orchestrator.run_handoff(
@@ -122,6 +112,7 @@ async def chat_message(
                         user_token=user_id,
                         raw_token=raw_token,
                         history=prior_messages or None,
+                        demo_mode=request.demo_mode,
                     )
 
                 async for event in gen:

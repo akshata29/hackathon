@@ -101,7 +101,7 @@ MCP tools:
 The agent MUST:
 - Set require_per_service_call_history_persistence=True
 - Verify the requesting user has access to the given policy_number
-  (checked via X-User-Id header by the MCP server)
+  (enforced via get_user_id_from_request() + check_scope() in the MCP server)
 - Present information in plain English — avoid jargon
 - Always state the effective and expiration dates clearly
 
@@ -478,9 +478,13 @@ Expose these tools with complete docstrings:
 11. get_household_changes(policy_number: str) -> list[dict]
 
 Security:
-- Bearer token auth: StaticTokenVerifier using MCP_AUTH_TOKEN env var
-- Row-level security: each tool must validate user owns the policy_number
-  by checking policies.user_id matches X-User-Id header; return 403 if mismatch
+- Bearer token auth: EntraTokenVerifier from entra_auth.py
+  (production: validates Entra OBO JWT; dev fallback: static MCP_AUTH_TOKEN when ENTRA_TENANT_ID unset)
+- Row-level security: call get_user_id_from_request() inside each tool;
+  validate policies.user_id matches caller's user_id; raise PermissionError if mismatch
+- Scope: call check_scope("policy-db.read") in every confidential tool
+- Audit: wrap each tool with audit_log(tool_name, user_id, outcome, duration_ms)
+- Copy entra_auth.py from template/mcp-servers/my-mcp/entra_auth.py
 
 Also create:
 - mcp-servers/policy-db/requirements.txt and Dockerfile
@@ -589,7 +593,7 @@ Script 2: scripts/seed-claims-db.py
       Returns each incident with days_remaining and roll_off_date pre-calculated
     get_incident_impact(policy_number: str, incident_id: str) -> dict
       Returns surcharge_pct, annual_surcharge_amount, projected_saving_at_rolloff
-  Use the same FastMCP + StaticTokenVerifier + row-level security pattern.
+  Use the same FastMCP + EntraTokenVerifier + row-level security pattern (entra_auth.py).
   Add mcp-servers/claims-db/requirements.txt and Dockerfile.
 
 Print a summary at the end of each seed script:

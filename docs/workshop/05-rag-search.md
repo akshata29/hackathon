@@ -36,31 +36,37 @@ pip install -r requirements.txt
 MCP_AUTH_TOKEN=dev-token python server.py
 ```
 
-Test row-level security:
+> **Auth modes**: The server uses `EntraTokenVerifier` from `entra_auth.py`.
+> When `ENTRA_TENANT_ID` is **not set**, it falls back to comparing the static `MCP_AUTH_TOKEN`
+> so you can run locally without Entra credentials.
+> In production, the backend exchanges the user's Entra token for an OBO token
+> and passes it as the Bearer token — the MCP server then extracts user identity from the JWT.
+
+Test with the dev-mode static token:
 
 ```powershell
-# User A — gets their own data
+# List tools
 Invoke-RestMethod -Method POST `
     -Uri "http://localhost:8002/mcp" `
-    -Headers @{ "Authorization"="Bearer dev-token"; "X-User-Id"="user-001" } `
+    -Headers @{ "Authorization"="Bearer dev-token" } `
     -ContentType "application/json" `
-    -Body '{"method": "tools/call", "params": {"name": "get_holdings", "arguments": {}}}'
+    -Body '{"method": "tools/list", "params": {}}'
 
-# User B — gets different data (row-level isolation)
+# Call a tool
 Invoke-RestMethod -Method POST `
     -Uri "http://localhost:8002/mcp" `
-    -Headers @{ "Authorization"="Bearer dev-token"; "X-User-Id"="user-002" } `
+    -Headers @{ "Authorization"="Bearer dev-token" } `
     -ContentType "application/json" `
     -Body '{"method": "tools/call", "params": {"name": "get_holdings", "arguments": {}}}'
 ```
 
-Verify the two responses contain different data. This is the row-level security you need to replicate.
-
 Open [mcp-servers/portfolio-db/server.py](../../mcp-servers/portfolio-db/server.py) and study:
 
-1. How `X-User-Id` is extracted from the request context
-2. How the user ID is used to filter database queries
-3. How `MCP_AUTH_TOKEN` Bearer token validation is implemented at the transport layer
+1. How `get_user_id_from_request()` is called inside each tool to obtain the caller's
+   stable identity from the verified JWT claims (or dev fallback)
+2. How the user ID is used to filter database queries (row-level security)
+3. How `EntraTokenVerifier` / `MultiIDPTokenVerifier` is configured in `entra_auth.py`
+4. How `check_scope()` and `audit_log()` are used for scope enforcement and traceability
 
 ---
 
@@ -86,17 +92,22 @@ The server will expose the following tools:
    Returns: <return structure>
 
 Row-level security requirement:
-- Each request includes an X-User-Id header
-- Queries must be scoped to the authenticated user_id
-- No user should ever see another user's data
+- Call get_user_id_from_request() inside each tool to get the authenticated caller's
+  stable user_id from the verified JWT (or dev fallback token)
+- Queries must be scoped to that user_id; no user should ever see another user's data
 - Return an empty result (not an error) if no data exists for that user
 
 Authentication:
-- MCP_AUTH_TOKEN environment variable must match the Bearer token in Authorization header
-- Return HTTP 401 if token is missing or wrong — do not expose which field was wrong
+- Use EntraTokenVerifier from entra_auth.py (copy from template/mcp-servers/my-mcp/)
+  Production: validates Entra OBO JWT; dev fallback: static MCP_AUTH_TOKEN when
+  ENTRA_TENANT_ID is not set
+- Call check_scope("<resource>.read") at the start of every confidential tool
+- Wrap each tool with audit_log(tool_name, user_id, outcome, duration_ms)
+- Return HTTP 401 if token is missing or invalid
 
 Place the server at `my-app/mcp-servers/my-mcp/server.py`
-Follow the same pattern as `mcp-servers/portfolio-db/server.py`.
+Copy entra_auth.py from template/mcp-servers/my-mcp/entra_auth.py
+Follow the same pattern as mcp-servers/portfolio-db/server.py
 
 For the data store, use <your chosen store — Cosmos DB with DefaultAzureCredential,
 SQLite for local dev, a REST API, etc.>.
@@ -116,7 +127,7 @@ MCP_AUTH_TOKEN=dev-token python server.py
 # Expected: Listening on http://0.0.0.0:8003
 ```
 
-Test each tool:
+Test each tool (dev mode — `ENTRA_TENANT_ID` not set, static token fallback active):
 
 ```powershell
 # List available tools
@@ -137,15 +148,25 @@ $call = @{
 
 Invoke-RestMethod -Method POST `
     -Uri "http://localhost:8003/mcp" `
-    -Headers @{ "Authorization"="Bearer dev-token"; "X-User-Id"="user-001" } `
+    -Headers @{ "Authorization"="Bearer dev-token" } `
     -ContentType "application/json" `
     -Body $call
 ```
 
-Test row-level isolation — send the same call with two different `X-User-Id` values and
-confirm the responses contain different data.
+> **Row-level isolation in dev mode**: in dev mode, `get_user_id_from_request()` returns
+> `"dev-user"` for the static token — all dev requests share one identity.
+> For multi-user isolation testing, set `ENTRA_TENANT_ID` and use real Entra OBO tokens.
 
-Test the 401 rejection — send a request with a wrong token and confirm HTTP 401 is returned.
+Test the 401 rejection — send a request with a wrong token and confirm HTTP 401 is returned:
+
+```powershell
+Invoke-RestMethod -Method POST `
+    -Uri "http://localhost:8003/mcp" `
+    -Headers @{ "Authorization"="Bearer wrong-token" } `
+    -ContentType "application/json" `
+    -Body '{"method": "tools/list", "params": {}}'
+# Expected: 401 Unauthorized
+```
 
 ---
 
@@ -153,17 +174,22 @@ Test the 401 rejection — send a request with a wrong token and confirm HTTP 40
 
 Open the CONFIDENTIAL agent file you created in Module 04. Ensure the MCP tool is wired:
 
+In production, the backend acquires an OBO token for the MCP server scope and passes it
+as the Bearer token. The MCP server extracts user identity from the JWT — no `X-User-Id`
+header is needed. For local dev, the static token fallback is used:
+
 ```python
 from agent_framework.mcp import MCPStreamableHTTPTool
 
-def create_my_agent(client, user_token: str) -> Agent:
+def create_my_agent(client, raw_token: str) -> Agent:
+    # raw_token is the Entra OBO token from the backend auth middleware
+    # (falls back to settings.mcp_auth_token in dev mode)
     mcp_tool = MCPStreamableHTTPTool(
         name="my-mcp",
         url=f"{settings.my_mcp_url}",
         approval_mode="auto",
         headers={
-            "Authorization": f"Bearer {settings.my_mcp_auth_token}",
-            "X-User-Id": user_token,   # propagate the user's identity
+            "Authorization": f"Bearer {raw_token}",
         },
     )
     return Agent(
@@ -175,11 +201,15 @@ def create_my_agent(client, user_token: str) -> Agent:
     )
 ```
 
+The `raw_token` is the OBO token extracted by `require_auth_context()` in `chat.py`
+and threaded through to `build_specialist_agents()` in the workflow.
+See `backend/app/workflows/portfolio_workflow.py` for the full pattern.
+
 Update `my-app/backend/.env` with:
 
 ```
 MY_MCP_URL=http://localhost:8003/mcp
-MY_MCP_AUTH_TOKEN=dev-token
+MCP_AUTH_TOKEN=dev-token
 ```
 
 ---

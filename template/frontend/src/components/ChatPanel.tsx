@@ -19,9 +19,11 @@ import { useIsAuthenticated } from '@azure/msal-react'
 import { useMsal } from '@azure/msal-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { loginRequest, backendUrl } from '../authConfig'
+import { tokenRequest, backendUrl } from '../authConfig'
 import { ChatMessage, StreamEvent, HandoffTrace, SessionSummary, Session } from '../types'
 import { AgentBadge } from './AgentBadge'
+import { AuthFlowPanel } from './AuthFlowPanel'
+import type { DemoMode } from '../App'
 
 function generateId() {
   return Math.random().toString(36).slice(2)
@@ -127,7 +129,7 @@ function formatSessionDate(isoString: string): string {
   return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 }
 
-export function ChatPanel() {
+export function ChatPanel({ demoMode = 'entra', onDemoModeChange }: { demoMode?: DemoMode; onDemoModeChange?: (m: DemoMode) => void }) {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
@@ -154,7 +156,7 @@ export function ChatPanel() {
   const getToken = useCallback(async (): Promise<string | null> => {
     if (!accounts.length) return null
     try {
-      const r = await instance.acquireTokenSilent({ ...loginRequest, account: accounts[0] })
+      const r = await instance.acquireTokenSilent({ ...tokenRequest, account: accounts[0] })
       return r.accessToken
     } catch {
       return null
@@ -270,7 +272,7 @@ export function ChatPanel() {
       const res = await fetch(`${backendUrl}/api/chat/message`, {
         method: 'POST',
         headers,
-        body: JSON.stringify({ message: userText, session_id: sessionId, mode: 'handoff' }),
+        body: JSON.stringify({ message: userText, session_id: sessionId, mode: 'handoff', demo_mode: demoMode }),
       })
 
       if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`)

@@ -7,6 +7,9 @@ import { NavBar } from './components/NavBar'
 // import { Dashboard } from './components/Dashboard'
 
 type Tab = 'chat' | 'dashboard'
+// demo_mode is passed to the backend with each chat request to select the MCP auth path.
+// 'entra' = production OBO flow; 'multi-idp' = Option B demo; 'okta-proxy' = Option C demo.
+export type DemoMode = 'entra' | 'multi-idp' | 'okta-proxy'
 
 // Placeholder dashboard rendered until you build your domain Dashboard component.
 function DashboardPlaceholder() {
@@ -20,13 +23,14 @@ function DashboardPlaceholder() {
 export default function App() {
   const isAuthenticated = useIsAuthenticated()
   const [activeTab, setActiveTab] = useState<Tab>('chat')
+  const [demoMode, setDemoMode] = useState<DemoMode>('entra')
 
   return (
     <div className="min-h-screen flex flex-col">
-      <NavBar activeTab={activeTab} onTabChange={setActiveTab} />
+      <NavBar activeTab={activeTab} onTabChange={setActiveTab} demoMode={demoMode} onDemoModeChange={setDemoMode} />
       <main className="flex-1 flex flex-col px-3 py-3">
         {activeTab === 'chat' ? (
-          <ChatPanel />
+          <ChatPanel demoMode={demoMode} onDemoModeChange={setDemoMode} />
         ) : (
           // TODO: Replace DashboardPlaceholder with <Dashboard /> once built.
           <DashboardPlaceholder />

@@ -21,21 +21,31 @@
 import logging
 import os
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from fastmcp import FastMCP
-from fastmcp.server.auth import StaticTokenVerifier
+from entra_auth import (
+    EntraTokenVerifier,    # single Entra tenant
+    MultiIDPTokenVerifier, # Entra + additional OIDC IdPs (set TRUSTED_ISSUERS env var)
+    get_user_id_from_request,
+    check_scope,
+    audit_log,
+)
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Auth — shared bearer token validated by FastMCP
-# The backend sends this token in its Authorization header.
-# In production, retrieve from Azure Key Vault (see mcp-servers/yahoo-finance/keyvault.py).
+# Auth -- choose one:
+#   EntraTokenVerifier:    Entra ID only (production default)
+#   MultiIDPTokenVerifier: Entra + extra OIDC IdPs (set TRUSTED_ISSUERS env var)
+#
+# Dev mode (ENTRA_TENANT_ID not set):
+#   Both verifiers fall back to static token comparison against MCP_AUTH_TOKEN.
 # ---------------------------------------------------------------------------
-_AUTH_TOKEN = os.getenv("MCP_AUTH_TOKEN", "dev-mcp-token-change-me")
-auth_provider = StaticTokenVerifier(
-    tokens={_AUTH_TOKEN: {"sub": "backend-service", "client_id": "backend"}}
-)
+auth_provider = EntraTokenVerifier()
+# auth_provider = MultiIDPTokenVerifier()  # uncomment to enable multi-IDP support
 
 mcp = FastMCP(
     name="my-mcp-server",                       # TODO: rename
@@ -48,20 +58,27 @@ mcp = FastMCP(
 )
 
 # ---------------------------------------------------------------------------
-# Row-level security helper (use for CONFIDENTIAL data)
+# Row-level security helper
 # ---------------------------------------------------------------------------
 #
-# If your data is per-user, the backend passes the authenticated user's identity
-# in the X-User-Id header. Enforce it like this:
+# For CONFIDENTIAL data, get the authenticated caller's ID and use it to
+# scope every query:
 #
-#   from fastmcp.server import Context
+#   import time
+#   from entra_auth import check_scope, get_user_id_from_request, audit_log
 #
 #   @mcp.tool()
-#   async def get_user_data(ctx: Context) -> dict:
-#       user_id = ctx.request.headers.get("X-User-Id", "")
-#       if not user_id:
-#           return {"error": "Missing X-User-Id header"}
-#       return fetch_data_for_user(user_id)
+#   async def get_user_data() -> dict:
+#       check_scope("my-resource.read")  # scope defined in your app registration
+#       user_id = get_user_id_from_request()
+#       start = time.monotonic()
+#       try:
+#           result = fetch_data_for_user(user_id)
+#           audit_log("get_user_data", user_id, "success", (time.monotonic()-start)*1000)
+#           return result
+#       except Exception as exc:
+#           audit_log("get_user_data", user_id, "error", error=str(exc))
+#           raise
 
 
 # ---------------------------------------------------------------------------

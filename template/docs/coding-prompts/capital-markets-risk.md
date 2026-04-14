@@ -84,8 +84,8 @@ The MCP server exposes these tools (include their names in the agent's tool list
   get_limit_utilisation(desk_id)                    — returns limit breaches + headroom
   get_risk_factor_sensitivities(book_id, factors)   — returns factor sensitivities
 
-The MCP server is authenticated with a Bearer token from settings.mcp_auth_token.
-User identity is passed as the X-User-Id header for row-level security.
+The MCP server uses EntraTokenVerifier from entra_auth.py for bearer token auth.
+User identity is obtained inside each tool via get_user_id_from_request() for row-level security.
 
 The agent MUST:
 - Set require_per_service_call_history_persistence=True
@@ -306,7 +306,7 @@ Schema:
 Expose these tools:
 1. get_positions(desk_id: str) -> list[dict]
    Returns all open positions for the authenticated user's desk.
-   Row-level security: filter by user_id from X-User-Id header.
+   Row-level security: call get_user_id_from_request() and filter by user_id.
 
 2. get_trade_history(desk_id: str, days: int = 5) -> list[dict]
    Returns trades executed in the last N days for the user's desk.
@@ -318,9 +318,13 @@ Expose these tools:
    Returns daily and cumulative P&L for the last N days.
 
 Security:
-- Bearer token auth using FastMCP StaticTokenVerifier (token from MCP_AUTH_TOKEN env var)
-- All tools must verify user_id from X-User-Id header and filter accordingly
+- Bearer token auth using EntraTokenVerifier from entra_auth.py
+  (production: validates Entra OBO JWT; dev fallback: static MCP_AUTH_TOKEN when ENTRA_TENANT_ID unset)
+- All tools must call get_user_id_from_request() and filter accordingly
 - Reject requests where user_id is "anonymous"
+- Call check_scope("trade-blotter.read") in every confidential tool
+- Wrap each tool with audit_log(tool_name, user_id, outcome, duration_ms)
+- Copy entra_auth.py from template/mcp-servers/my-mcp/entra_auth.py
 
 Follow the same structure as mcp-servers/portfolio-db/server.py.
 
