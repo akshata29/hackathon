@@ -23,7 +23,8 @@ router = APIRouter()
 
 def _get_user_id(authorization: str | None = Header(default=None)) -> str:
     """
-    Extract user ID from Entra Bearer token (mirrors chat route).
+    Extract user ID from Entra Bearer token (mirrors chat route AuthContext.user_id).
+    Preference order: preferred_username (email/UPN) > oid > sub.
     Falls back to 'anonymous' in development when no token is present.
     """
     if not authorization or not authorization.startswith("Bearer "):
@@ -37,7 +38,12 @@ def _get_user_id(authorization: str | None = Header(default=None)) -> str:
         parts = token.split(".")
         if len(parts) >= 2:
             payload = json.loads(base64.urlsafe_b64decode(parts[1] + "=="))
-            return payload.get("oid") or payload.get("sub") or "anonymous"
+            return (
+                payload.get("preferred_username")
+                or payload.get("oid")
+                or payload.get("sub")
+                or "anonymous"
+            )
     except Exception:
         pass
     return "anonymous"

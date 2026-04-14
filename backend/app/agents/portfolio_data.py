@@ -51,6 +51,8 @@ class PortfolioDataAgent(BaseAgent):
         mcp_auth_token: str | None = None,
         raw_token: str | None = None,
         settings=None,
+        demo_mode: str = "entra",
+        mock_oidc_token: str | None = None,
         **kwargs,
     ) -> list:
         """
@@ -66,6 +68,12 @@ class PortfolioDataAgent(BaseAgent):
           Falls back to X-User-Id header + static MCP_AUTH_TOKEN bearer.
           Both are required so the portfolio MCP can do RLS locally.
 
+        Security (demo modes):
+          "multi-idp"  — presents a mock Okta JWT directly; MCP validates via
+                         MultiIDPTokenVerifier (TRUSTED_ISSUERS=http://localhost:8888).
+          "okta-proxy" — no dedicated proxy for portfolio; falls back to multi-idp
+                         style (direct mock-JWT call) so the demo still runs.
+
         Reference:
           https://learn.microsoft.com/en-us/azure/foundry/agents/how-to/tools/model-context-protocol
           https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-on-behalf-of-flow
@@ -76,20 +84,31 @@ class PortfolioDataAgent(BaseAgent):
 
         mcp_client_id = getattr(settings, "portfolio_mcp_client_id", "") if settings else ""
 
-        # In dev mode, include X-User-Id so the MCP server can still do RLS
-        # via the header-based fallback path.
-        extra_headers: dict = {}
-        if not (settings and settings.entra_tenant_id and mcp_client_id and raw_token):
-            extra_headers["X-User-Id"] = user_token or "anonymous"
+        # Build HTTP client based on mode
+        if demo_mode in ("multi-idp", "okta-proxy") and mock_oidc_token:
+            # Demo mode: use mock Okta JWT directly.
+            # X-User-Id still needed so the MCP server can do RLS via header fallback
+            # (the mock token carries `sub` but not Entra `oid`).
+            http_client = httpx.AsyncClient(headers={
+                "Authorization": f"Bearer {mock_oidc_token}",
+                "X-User-Id": user_token or "demo-user",
+            })
+        else:
+            # Production / dev: OBO or static bearer
+            # In dev mode, include X-User-Id so the MCP server can still do RLS
+            # via the header-based fallback path.
+            extra_headers: dict = {}
+            if not (settings and settings.entra_tenant_id and mcp_client_id and raw_token):
+                extra_headers["X-User-Id"] = user_token or "anonymous"
 
-        http_client = build_obo_http_client(
-            settings=settings,
-            raw_token=raw_token,
-            mcp_client_id=mcp_client_id,
-            scope_name="portfolio.read",
-            fallback_bearer=mcp_auth_token or "dev-portfolio-mcp-token",
-            extra_headers=extra_headers,
-        )
+            http_client = build_obo_http_client(
+                settings=settings,
+                raw_token=raw_token,
+                mcp_client_id=mcp_client_id,
+                scope_name="portfolio.read",
+                fallback_bearer=mcp_auth_token or "dev-portfolio-mcp-token",
+                extra_headers=extra_headers,
+            )
 
         return [
             MCPStreamableHTTPTool(
@@ -104,6 +123,7 @@ class PortfolioDataAgent(BaseAgent):
     def create_from_context(cls, ctx: "AgentBuildContext"):
         """Registry hook — extract Portfolio MCP config and auth tokens from context."""
         from app.core.agents.base import AgentBuildContext  # noqa: F401
+        mock_oidc_tokens = getattr(ctx, "mock_oidc_tokens", {})
         return cls.create(
             ctx.client,
             portfolio_mcp_url=ctx.settings.portfolio_mcp_url,
@@ -111,6 +131,8 @@ class PortfolioDataAgent(BaseAgent):
             mcp_auth_token=ctx.settings.mcp_auth_token,
             raw_token=ctx.raw_token,
             settings=ctx.settings,
+            demo_mode=getattr(ctx, "demo_mode", "entra"),
+            mock_oidc_token=mock_oidc_tokens.get("portfolio"),
         )
 
 

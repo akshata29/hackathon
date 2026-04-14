@@ -66,6 +66,14 @@ class AgentBuildContext:
     raw_token: str | None = None
     context_providers: list | None = field(default=None)
     github_token: str | None = None
+    # Cross-IDP demo mode (see docs/architecture/auth-and-mcp-patterns.md §13)
+    # "entra" — default Entra OBO flow
+    # "multi-idp" — MCP servers receive mock Okta JWT directly (MultiIDPTokenVerifier)
+    # "okta-proxy" — Yahoo Finance calls routed through the Okta proxy
+    demo_mode: str = "entra"
+    # Per-MCP-audience mock OIDC tokens pre-fetched when demo_mode != "entra".
+    # Keys: "yahoo", "portfolio".  Values: signed JWT strings from mock-oidc.
+    mock_oidc_tokens: dict = field(default_factory=dict)
 
 
 class BaseAgent(ABC):
@@ -127,7 +135,7 @@ class BaseAgent(ABC):
             **kwargs: Forwarded verbatim to ``build_tools()``.
 
         Returns:
-            A configured ``Agent`` with ``require_per_service_call_history_persistence=True``.
+            A configured ``Agent`` instance.
         """
         from agent_framework import Agent
 

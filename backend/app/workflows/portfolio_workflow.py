@@ -101,6 +101,47 @@ class PortfolioOrchestrator(BaseOrchestrator):
         finally:
             await store.close()
 
+    async def _fetch_mock_oidc_tokens(self, user_email: str) -> dict:
+        """Fetch per-audience mock OIDC tokens from the mock-oidc server.
+
+        Returns a dict with keys "yahoo" and "portfolio", each mapped to a signed
+        JWT whose audience matches the corresponding MCP server's app registration.
+        Used for cross-IDP demo modes (Option B multi-idp, Option C okta-proxy).
+        """
+        import httpx
+
+        base_url = self._settings.mock_oidc_url
+        audiences = {
+            "yahoo": f"api://{self._settings.yahoo_mcp_client_id}",
+            "portfolio": f"api://{self._settings.portfolio_mcp_client_id}",
+        }
+        result: dict = {}
+        try:
+            async with httpx.AsyncClient() as client:
+                for key, aud in audiences.items():
+                    if not aud or aud == "api://":
+                        continue
+                    try:
+                        resp = await client.post(
+                            f"{base_url}/token",
+                            data={
+                                "sub": user_email,
+                                "email": user_email,
+                                "audience": aud,
+                                "scope": "openid profile email portfolio.read market.read",
+                            },
+                            timeout=3.0,
+                        )
+                        resp.raise_for_status()
+                        token = resp.json().get("access_token")
+                        if token:
+                            result[key] = token
+                    except Exception as exc:
+                        logger.warning("mock-oidc token fetch failed for %s: %s", key, exc)
+        except Exception as exc:
+            logger.warning("Could not connect to mock-oidc server at %s: %s", base_url, exc)
+        return result
+
     @staticmethod
     def _extract_oid(raw_token: str | None, fallback: str | None) -> str | None:
         """Extract the stable `oid` claim from a raw JWT without signature verification.
@@ -118,10 +159,31 @@ class PortfolioOrchestrator(BaseOrchestrator):
             pass
         return fallback
 
-    async def run_handoff(self, message, session_id, user_token=None, raw_token=None, history=None):
-        """Pre-fetch GitHub token then delegate to base run_handoff."""
+    async def run_handoff(self, message, session_id, user_token=None, raw_token=None, history=None, demo_mode="entra"):
+        """Pre-fetch GitHub token (and mock OIDC tokens for demo modes) then delegate to base run_handoff."""
         oid = self._extract_oid(raw_token, user_token)
         self._github_token = await self._fetch_github_token(oid)
+        self._demo_mode = demo_mode
+        self._mock_oidc_tokens: dict = {}
+        if demo_mode in ("multi-idp", "okta-proxy"):
+            # Prefer an email-style identity for the mock token sub/email claims.
+            # user_token may be an Entra OID (UUID) — fall back to a demo email so
+            # the mock OIDC server can populate the email claim correctly.
+            user_email = (
+                user_token
+                if user_token and "@" in user_token
+                else "demo@hackathon.local"
+            )
+            self._mock_oidc_tokens = await self._fetch_mock_oidc_tokens(user_email)
+            if self._mock_oidc_tokens:
+                logger.info("demo_mode=%s; fetched mock OIDC tokens for: %s", demo_mode, list(self._mock_oidc_tokens))
+            else:
+                logger.warning(
+                    "demo_mode=%s but NO mock OIDC tokens fetched — is the mock OIDC server "
+                    "running? Start 6_run_mock_oidc.bat (http://localhost:8888). "
+                    "Falling back to regular Entra/dev auth for MCP calls.",
+                    demo_mode,
+                )
         async for event in super().run_handoff(
             message=message,
             session_id=session_id,
@@ -131,10 +193,15 @@ class PortfolioOrchestrator(BaseOrchestrator):
         ):
             yield event
 
-    async def run_comprehensive(self, message, session_id, user_token=None, raw_token=None, history=None):
-        """Pre-fetch GitHub token then delegate to base run_comprehensive."""
+    async def run_comprehensive(self, message, session_id, user_token=None, raw_token=None, history=None, demo_mode="entra"):
+        """Pre-fetch GitHub token (and mock OIDC tokens for demo modes) then delegate to base run_comprehensive."""
         oid = self._extract_oid(raw_token, user_token)
         self._github_token = await self._fetch_github_token(oid)
+        self._demo_mode = getattr(self, "_demo_mode", demo_mode)
+        self._mock_oidc_tokens = getattr(self, "_mock_oidc_tokens", {})
+        if demo_mode in ("multi-idp", "okta-proxy") and not self._mock_oidc_tokens:
+            user_email = user_token or "demo@hackathon.local"
+            self._mock_oidc_tokens = await self._fetch_mock_oidc_tokens(user_email)
         async for event in super().run_comprehensive(
             message=message,
             session_id=session_id,
@@ -167,6 +234,8 @@ class PortfolioOrchestrator(BaseOrchestrator):
             raw_token=raw_token,
             context_providers=[self._search_provider] if self._search_provider else None,
             github_token=getattr(self, "_github_token", None),
+            demo_mode=getattr(self, "_demo_mode", "entra"),
+            mock_oidc_tokens=getattr(self, "_mock_oidc_tokens", {}),
         )
 
         agents = [

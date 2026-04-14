@@ -20,6 +20,14 @@ extending the system or adapting patterns to a new use-case.
 7. [Security Boundaries Summary](#7-security-boundaries-summary)
 8. [Development vs Production Mode](#8-development-vs-production-mode)
 9. [Environment Variables Reference](#9-environment-variables-reference)
+10. [Per-Tool Audit Logging (MCP08)](#10-per-tool-audit-logging-mcp08--camp-4-telemetry)
+11. [Prompt Injection Defense (MCP06)](#11-prompt-injection-defense--azure-ai-content-safety-mcp06)
+12. [Supply Chain Security — Dependabot](#12-supply-chain-security--dependabot-mcp03mcp04)
+13. [Cross-IDP Single Sign-On — Okta + Entra + MCP](#13-cross-idp-single-sign-on--okta--entra--mcp)
+    - [Option A — APIM Token Exchange Policy](#option-a--apim-token-exchange-policy-no-code-changes)
+    - [Option B — Multi-IDP Trust on MCP Server](#option-b--multi-idp-trust-on-mcp-server-already-implemented)
+    - [Option C — Okta-to-Entra Token Exchange Proxy](#option-c--okta-to-entra-token-exchange-proxy-implemented-in-this-repo)
+    - [Option D — Entra External Identities Federation with Okta](#option-d--entra-external-identities-federation-with-okta-strategic)
 
 ---
 
@@ -730,8 +738,16 @@ Sequence for a chat message that queries the portfolio agent in production:
 | Dev mode bypass | Only when ENTRA_TENANT_ID is unset | `middleware.py` + `obo.py` |
 | Prompt injection guardrail | `check_user_message` before workflow | `core/guardrails/policy.py` |
 | MCP tool argument injection | Azure AI Content Safety on all string args | `mcp-servers/*/entra_auth.py` |
-| MCP per-tool audit trail | Structured JSON log per tool invocation | `mcp-servers/*/entra_auth.py` |
+| Technical injection detection (Camp 3) | `check_injection_patterns()` — shell/SQL/path traversal/template regex before Content Safety | `mcp-servers/*/entra_auth.py` |
+| Jailbreak / indirect prompt injection (Camp 3) | `check_prompt_shields()` — Azure Content Safety Prompt Shields REST endpoint (`/contentsafety/text:shieldPrompt`) | `mcp-servers/*/entra_auth.py` |
+| Output credential leakage (Camp 3) | `scan_output_credentials()` — regex + Shannon entropy redaction on tool responses; applied to `get_news` | `mcp-servers/*/entra_auth.py` |
+| MCP per-tool audit trail | `audit_log()` with `extra={"custom_dimensions": ...}` per tool invocation | `mcp-servers/*/entra_auth.py` |
+| Structured security event telemetry (Camp 4) | `SecurityEventType` + `log_security_event()` emit INJECTION_BLOCKED / CREDENTIAL_DETECTED / INPUT_CHECK_PASSED events as KQL-queryable custom dimensions | `mcp-servers/*/entra_auth.py` |
+| Azure Monitor OTel on MCP servers (Camp 4) | `configure_azure_monitor()` on startup; unified telemetry with backend in one Application Insights instance | `mcp-servers/*/server.py` |
 | Supply chain vulnerabilities | Dependabot weekly scans (pip + npm) | `.github/dependabot.yml` |
+| OAuth 2.1 client auto-discovery | `/.well-known/oauth-protected-resource` (RFC 9728 PRM) | `mcp-servers/*/entra_auth.py` (`make_prm_app()`) |
+| 401 auth challenge header | `WWW-Authenticate: Bearer resource_metadata="..."` on every 401/403 | `mcp-servers/*/entra_auth.py` (`PRMAuthenticateMiddleware`) |
+| Multi-IDP token acceptance | Trusted OIDC issuers whitelist (Entra + configurable) | `mcp-servers/*/entra_auth.py` (`MultiIDPTokenVerifier`) |
 
 **Cross-user data access is structurally prevented**: the OBO token carries the oid claim;
 the MCP server uses it as the SQL WHERE clause parameter.  There is no code path that could
@@ -778,6 +794,7 @@ dev that is a fixed string, in production it is a cryptographically verified cla
 | `PORTFOLIO_MCP_URL` | Internal Container App URL of portfolio-db MCP server |
 | `YAHOO_MCP_URL` | Internal Container App URL of yahoo-finance MCP server |
 | `MCP_AUTH_TOKEN` | Static token for dev-mode MCP auth (not used in production) |
+| `RESOURCE_URL` | Public-facing HTTPS URL of the MCP server (used in PRM endpoint and `WWW-Authenticate` headers); inferred from request host if unset |
 
 ### MCP servers (Pattern 1b — public)
 
@@ -800,14 +817,31 @@ dev that is a fixed string, in production it is a cryptographically verified cla
 | `AZURE_CONTENT_SAFETY_ENDPOINT` | Azure AI Content Safety endpoint URL (omit to disable; safe to leave unset in dev) |
 | `TRUSTED_ISSUERS` | Comma-separated additional OIDC issuer URLs (e.g. Okta); Entra is always trusted |
 | `JWKS_CACHE_TTL` | JWKS key cache lifetime in seconds (default: `3600`) |
+| `APPLICATIONINSIGHTS_CONNECTION_STRING` | Application Insights connection string; when set, activates Azure Monitor OpenTelemetry on MCP server startup for unified telemetry with the backend (Camp 4) |
 
 ---
 
-## 10. Per-Tool Audit Logging (MCP08)
+## 10. Per-Tool Audit Logging (MCP08) — Camp 4 Telemetry
 
-Every MCP tool invocation emits a structured JSON log entry at `INFO` level via the
-standard Python `logging` module.  The entry is written by `audit_log()` in
+Every MCP tool invocation emits a structured log entry via `audit_log()` in
 `entra_auth.py` inside a `try/finally` block that executes even if the tool raises.
+
+When `APPLICATIONINSIGHTS_CONNECTION_STRING` is set and Azure Monitor OpenTelemetry
+is active, entries use `extra={"custom_dimensions": entry}` so Application Insights
+stores each field as a queryable dimension.  This enables KQL queries such as:
+
+```kql
+// Failed tool attempts by user
+traces
+| where customDimensions.outcome == "denied"
+| summarize FailedAttempts = count() by tostring(customDimensions.user_id), tostring(customDimensions.tool)
+| order by FailedAttempts desc
+
+// Security events by type
+traces
+| where customDimensions.event_type in ("INJECTION_BLOCKED", "CREDENTIAL_DETECTED")
+| summarize count() by tostring(customDimensions.event_type), bin(timestamp, 5m)
+```
 
 ### Log format
 
@@ -818,6 +852,19 @@ standard Python `logging` module.  The entry is written by `audit_log()` in
   "user_id": "alice@contoso.com",
   "outcome": "success",
   "duration_ms": 12.3
+}
+```
+
+Security events from `log_security_event()` use a separate schema:
+
+```json
+{
+  "event_type": "INJECTION_BLOCKED",
+  "category": "shell_injection",
+  "correlation_id": "<uuid>",
+  "severity": "WARNING",
+  "injection_type": "shell_injection",
+  "description": "shell metacharacter"
 }
 ```
 
@@ -918,22 +965,30 @@ The function:
 5. **Logs but does not block** on Content Safety API errors — availability of the safety
    service is not a hard dependency.
 
-### Defense-in-depth layering
+### Defense-in-depth layering (Camp 3 I/O Security — three-layer input + output pipeline)
 
 ```
 LLM argument
     |
-    v (1) check_content_safety()  — semantic: detects injection, hate, violence
+    v (1) check_injection_patterns()  — technical: shell/SQL/path traversal/template regex (MCP-05)
     |
-    v (2) _validate_symbol()      — format: regex [A-Z0-9.\-\^=]{1,10}
+    v (2) check_prompt_shields()      — AI: Azure Content Safety Prompt Shields jailbreak detection (MCP-06)
     |
-    v (3) parameterised SQL / yfinance — structural: no string interpolation
+    v (3) check_content_safety()      — semantic: hate/violence/self-harm/sexual categories
     |
-    v (4) row-level security      — data: user_id == OBO identity
+    v (4) _validate_symbol()          — format: regex [A-Z0-9.\-\^=]{1,10}
+    |
+    v (5) parameterised SQL / yfinance — structural: no string interpolation
+    |
+    v (6) row-level security          — data: user_id == OBO identity
+    |
+    v (7) scan_output_credentials()   — output: credential redaction + entropy analysis (MCP-10)
+                                        (applied to get_news and any tool returning third-party content)
 ```
 
-Even if Content Safety is disabled or skipped, layers 2-4 provide robust protection
-against injection for the current tool argument types.
+Even if Content Safety is disabled or skipped, layers 1, 4–6 provide robust protection
+against injection for the current tool argument types.  Layer 7 protects against accidental
+secret exfiltration in tool responses.
 
 ### Provisioning Content Safety
 
@@ -985,3 +1040,354 @@ For supply chain *vulnerability* alerts (not just version bumps), enable in
 - **Dependency graph** — required for Dependabot
 - **Dependabot alerts** — notifies on known CVEs
 - **Dependabot security updates** — auto-opens security PRs (independent of schedule)
+
+---
+
+## 13. Cross-IDP Single Sign-On — Okta + Entra + MCP
+
+This section documents all four solutions to the double-authentication problem that
+occurs when Copilot Studio (Okta IDP) calls an MCP server secured with Entra.
+
+### The core problem
+
+```
+Copilot Studio (authenticated with Okta)
+    --> APIM
+        --> MCP Server on ACA (expects Entra JWT)
+                                ^--- Entra auth prompt appears here
+```
+
+The MCP server's `EntraTokenVerifier` validates against Entra's JWKS.  An Okta JWT
+never passes that check, so Entra re-prompts the user — even though they already
+authenticated with Okta.
+
+**Root cause:** Token audiences are IdP-scoped.  An Okta token's `aud` will never equal
+`api://<Entra-MCP-ClientID>`.  The two identity systems are isolated.
+
+**Key constraint:** Entra's OBO grant (`urn:ietf:params:oauth:grant-type:jwt-bearer`)
+only accepts **Entra-issued** JWTs as the `assertion` parameter.  Feeding an Okta token
+into the OBO endpoint returns a 400.  There is no native Entra call that converts an
+Okta token into a delegated Entra token — short of federation (Option D).
+
+---
+
+### Option A — APIM Token Exchange Policy (no code changes)
+
+**Best for:** Fastest path to production with no Okta-side configuration required.
+
+```
+Copilot Studio (Okta JWT)
+    |
+    v
+APIM (inbound policy):
+    1. validate-jwt against Okta JWKS        <- validates user is legit
+    2. extract sub/email from Okta token     <- capture user identity
+    3. authentication-managed-identity       <- APIM MI gets Entra service token
+       resource = api://<MCP_CLIENT_ID>
+    4. replace Authorization: Bearer <Entra service token>
+    5. inject X-Forwarded-User: <okta-email>
+    |
+    v
+MCP Server (ACA, internal ingress):
+    - EntraTokenVerifier validates Entra MI token (passes)
+    - X-Forwarded-User read by get_user_id_from_request() for RLS
+    - No user interaction required
+```
+
+**APIM inbound policy:**
+
+```xml
+<inbound>
+    <!-- Step 1: Validate incoming Okta token -->
+    <validate-jwt header-name="Authorization" failed-validation-httpcode="401"
+                  failed-validation-error-variable-name="jwt-error">
+        <openid-config url="https://<okta-domain>/oauth2/default/.well-known/openid-configuration" />
+        <audiences>
+            <audience>api://<okta-app-client-id></audience>
+        </audiences>
+    </validate-jwt>
+
+    <!-- Step 2: Extract user identity from validated token -->
+    <set-variable name="okta-user"
+        value="@(context.Request.Headers.GetValueOrDefault("Authorization","")
+                  .AsJwt()?.Claims.GetValueOrDefault("email",
+                    context.Request.Headers.GetValueOrDefault("Authorization","")
+                      .AsJwt()?.Claims.GetValueOrDefault("sub","unknown")))" />
+
+    <!-- Step 3 + 4: Swap Authorization header — APIM MI token for MCP app reg -->
+    <authentication-managed-identity resource="api://<MCP_CLIENT_ID>"
+                                     output-token-variable-name="mcp-token"
+                                     ignore-error="false" />
+    <set-header name="Authorization" exists-action="override">
+        <value>@("Bearer " + (string)context.Variables["mcp-token"])</value>
+    </set-header>
+
+    <!-- Step 5: Forward user identity as a trusted header -->
+    <set-header name="X-Forwarded-User" exists-action="override">
+        <value>@((string)context.Variables["okta-user"])</value>
+    </set-header>
+</inbound>
+```
+
+**Why X-Forwarded-User is safe here:**
+The MCP server Container App has `external: false` (internal ingress only).  The only
+path to that server is through APIM.  `X-Forwarded-User` cannot be spoofed by an
+external caller because there is no external route.
+
+**MCP server changes needed:** None.  `get_user_id_from_request()` in `entra_auth.py`
+already falls back to the `X-User-Id` / `X-Forwarded-User` header when the `oid` claim
+is absent from a service token.
+
+**Azure prerequisites:**
+- APIM instance (already in the customer architecture)
+- APIM's Managed Identity must have the `<MCP_CLIENT_ID>` API permission granted via
+  Entra app role or scope assignment
+- APIM must be able to reach the internal ACA ingress (VNet peering or Container Apps
+  Environment with APIM in the same VNet)
+
+**Tradeoffs:**
+| | |
+|---|---|
+| User identity | In `X-Forwarded-User` header (trusted but unsigned) |
+| Okta changes | None |
+| Code changes | None |
+| New infrastructure | APIM policy + MI permission |
+| Time to ship | 1-2 days |
+
+---
+
+### Option B — Multi-IDP Trust on MCP Server (already implemented)
+
+**Best for:** Cryptographically-signed user identity end-to-end, if Okta authorization
+server configuration is possible.
+
+**This is already implemented in this codebase.**  `MultiIDPTokenVerifier` in
+`mcp-servers/portfolio-db/entra_auth.py` and `mcp-servers/yahoo-finance/entra_auth.py`
+accepts tokens from any OIDC-compliant issuer listed in `TRUSTED_ISSUERS`.
+
+```
+Copilot Studio (Okta JWT, aud=api://<MCP_CLIENT_ID>)
+    |
+    v
+APIM (pass-through — no token modification needed)
+    |
+    v
+MCP Server:
+    MultiIDPTokenVerifier.verify_token(token):
+        1. Read 'iss' from unverified claims
+        2. Compare against [entra_issuer] + TRUSTED_ISSUERS
+        3. Fetch JWKS from issuer's /.well-known/openid-configuration
+        4. Validate RS256 signature, audience, expiry
+        5. Return AccessToken with claims (sub, email, scp)
+    RLS uses claims["email"] or claims["sub"] directly — no header needed
+```
+
+**Required Okta configuration:**
+
+The Okta Authorization Server must issue tokens with:
+- `aud` = `api://<MCP_CLIENT_ID>` (the Entra app registration client ID of the MCP server)
+- `scp` or `scope` containing the required scopes (e.g. `portfolio.read`)
+
+In Okta Admin Console:
+1. **Security → API → Authorization Servers** → select your server
+2. **Scopes** → add `portfolio.read`, `market.read`
+3. **Access Policies** → allow the Copilot Studio app to request those scopes
+4. **Token** tab → set **Audience** to `api://<MCP_CLIENT_ID>`
+
+**Activation (one env var change per MCP server):**
+
+```bash
+# mcp-servers/portfolio-db/.env  or ACA environment variable
+TRUSTED_ISSUERS=https://dev-xxxxx.okta.com/oauth2/default
+
+# mcp-servers/yahoo-finance/.env
+TRUSTED_ISSUERS=https://dev-xxxxx.okta.com/oauth2/default
+```
+
+Both servers are already using `MultiIDPTokenVerifier()` as their auth provider.
+Setting `TRUSTED_ISSUERS` activates the multi-IDP path automatically.
+
+**Local simulation (no real Okta needed):**
+
+```bash
+# Terminal 1 — start mock OIDC server (simulates Okta)
+6_run_mock_oidc.bat
+
+# Terminal 2 — start yahoo-finance MCP with mock OIDC trusted
+# Edit mcp-servers/yahoo-finance/.env:
+#   TRUSTED_ISSUERS=http://localhost:8888
+#   MCP_CLIENT_ID=mock-mcp-client
+3_run_mcp_yahoo.bat
+
+# Obtain a mock Okta token
+curl http://localhost:8888/token/for/alice@demo.com?audience=api://mock-mcp-client
+
+# Call MCP tool with that token
+curl -H "Authorization: Bearer <token>" http://localhost:8001/mcp/tools/list
+```
+
+**Tradeoffs:**
+| | |
+|---|---|
+| User identity | JWT claim (cryptographically signed, no header trust required) |
+| Okta changes | Must configure audience = api://<MCP_CLIENT_ID> |
+| Code changes | None (already in codebase) |
+| New infrastructure | None |
+| Time to ship | Hours (if Okta audience can be configured) |
+
+---
+
+### Option C — Okta-to-Entra Token Exchange Proxy (implemented in this repo)
+
+**Best for:** Demo/showcase when neither Okta audience configuration nor Entra
+federation is available, or when centralized mapping + audit logging is required.
+
+```
+Copilot Studio (Okta JWT)
+    |
+    v
+okta-proxy (mcp-servers/okta-proxy/server.py, port 8003):
+    1. Validate Okta JWT via JWKS           <- ensures user is authenticated
+    2. Extract sub/email claim              <- user identity
+    3. Apply USER_MAPPING dict              <- Okta email -> Entra UPN
+    4a. Dev mode:  use TARGET_MCP_TOKEN     <- static dev token
+    4b. Prod mode: client_credentials       <- Entra service token for MCP app reg
+    5. Add X-Forwarded-User: <mapped-email>
+    6. Proxy full request (incl. SSE)
+    |
+    v
+MCP Server:
+    - Validates Entra/dev token
+    - Reads X-Forwarded-User for RLS
+```
+
+**Why this is NOT true OBO:**
+Entra's OBO grant requires an Entra-issued `assertion`.  The proxy uses
+`client_credentials` instead, producing a service token.  User identity travels in
+`X-Forwarded-User` (same trust model as APIM Option A).  This is semantically equivalent
+to Option A but implemented as a Python service rather than an APIM policy.
+
+**Running locally:**
+
+```bash
+# 1. Start mock OIDC (simulates Okta)
+6_run_mock_oidc.bat
+
+# 2. Start the target MCP server (yahoo-finance on :8001)
+3_run_mcp_yahoo.bat
+
+# 3. Start the proxy
+7_run_okta_proxy.bat
+
+# 4. Get a mock Okta token
+curl http://localhost:8888/token/for/alice@demo.com?audience=api://mock-mcp-client
+
+# 5. Call the proxy — no Entra login, no popup
+curl -H "Authorization: Bearer <okta-token>" http://localhost:8003/mcp/tools/list
+```
+
+**Key proxy configuration (mcp-servers/okta-proxy/.env):**
+
+```ini
+OKTA_ISSUER=http://localhost:8888          # or real Okta issuer URL
+OKTA_AUDIENCE=api://mock-mcp-client        # must match token 'aud' claim
+TARGET_MCP_URL=http://localhost:8001       # downstream MCP server
+TARGET_MCP_TOKEN=dev-yahoo-mcp-token       # dev mode only
+
+# Optional user mapping (JSON)
+USER_MAPPING={"alice@okta.example":"alice@company.onmicrosoft.com"}
+
+# Production Entra values (leave blank for dev mode)
+ENTRA_TENANT_ID=
+ENTRA_CLIENT_ID=
+ENTRA_CLIENT_SECRET=
+MCP_CLIENT_ID=
+```
+
+**Tradeoffs:**
+| | |
+|---|---|
+| User identity | Header (trusted, not signed — same as Option A) |
+| Okta changes | None |
+| Code changes | New service (already built in this repo) |
+| New infrastructure | One extra Container App in ACA |
+| Time to ship | 1 week |
+
+---
+
+### Option D — Entra External Identities Federation with Okta (strategic)
+
+**Best for:** Long-term production architecture.  Zero code changes.  Full
+cryptographic user identity propagation with no proxy layer.
+
+```
+Okta user authenticates
+    |
+    v
+Entra External Identities (B2B federation):
+    - Okta is configured as a SAML/OIDC identity provider in the Entra tenant
+    - Okta users appear as guest/member accounts in Entra
+    - SCIM provisioning synchronises users from Okta to Entra
+    |
+    v
+Copilot Studio (obtains an Entra token via the federated identity)
+    |  Bearer <Entra token>  (aud = backend or MCP app reg)
+    v
+APIM -> MCP Server:
+    - Existing EntraTokenVerifier works unchanged
+    - Existing OBO flow works unchanged
+    - Full oid claim present — RLS, audit logging, scope enforcement all work
+    - NO proxy layers, NO X-Forwarded-User headers
+```
+
+**Setup steps (Entra + Okta admin coordination required):**
+
+**Step 1 — Configure Okta as a federated IdP in Entra:**
+1. Entra Admin Center → **External Identities → All identity providers**
+2. Add a new **OIDC** provider:
+   - Display name: `Okta`
+   - Client ID: Okta app client ID
+   - Client secret: Okta app client secret
+   - Issuer URL: `https://<okta-domain>/oauth2/default`
+   - Scopes: `openid profile email`
+3. Under **Cross-tenant access settings** → configure inbound trust for Okta users
+
+**Step 2 — Provision users via SCIM:**
+
+Okta has a built-in **Microsoft Entra ID** app in Okta Integration Network:
+1. In Okta Admin: **Applications → Browse App Catalog** → "Microsoft Entra ID"
+2. Configure SCIM provisioning to create/update guest accounts in Entra
+3. Map Okta profile attributes to Entra attributes (especially `mail` → `userPrincipalName`)
+
+**Step 3 — Update Copilot Studio authentication:**
+- Configure Copilot Studio to use **Entra** (not Okta) as the auth provider, but
+  federated login routes through Okta transparently for Okta users
+- Or use Entra's **Sign in with external IdP** flow directly in Copilot Studio
+
+**Step 4 — No MCP server changes:**
+The existing `EntraTokenVerifier` and OBO flow handle everything.  The Okta user is
+now a first-class Entra identity.
+
+**Tradeoffs:**
+| | |
+|---|---|
+| User identity | JWT claim, cryptographically signed end-to-end |
+| Okta changes | Create OIDC app, configure SCIM |
+| Entra changes | Configure external IdP, inbound trust, SCIM |
+| Code changes | None |
+| New infrastructure | None |
+| Time to ship | Weeks (admin coordination + user provisioning testing) |
+
+---
+
+### Comparison summary
+
+| | Option A: APIM Policy | Option B: Multi-IDP | Option C: Proxy | Option D: Federation |
+|---|---|---|---|---|
+| User identity in MCP | Header (trusted) | JWT claim (signed) | Header (trusted) | JWT claim (signed) |
+| Okta admin needed | No | Yes (audience config) | No | Yes (OIDC + SCIM) |
+| Entra admin needed | MI permissions | No | No (dev) / Yes (prod) | Yes (external IdP) |
+| Code changes | None | None | New service | None |
+| Simulated in this repo | No (APIM required) | Yes — `6_run_mock_oidc.bat` | Yes — `7_run_okta_proxy.bat` | No |
+| Production-ready | Yes | Yes | Yes (with Entra creds) | Yes (after setup) |
+| Recommended phase | Fastest path | If Okta audience configurable | Demo / audit logging | Long-term target |

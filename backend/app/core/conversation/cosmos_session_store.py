@@ -93,7 +93,7 @@ class CosmosSessionStore:
     # ------------------------------------------------------------------
 
     async def create_session(
-        self, session_id: str, user_id: str, title: str
+        self, session_id: str, user_id: str, title: str, demo_mode: str = "entra"
     ) -> dict:
         """Create a new session document. Raises if session already exists."""
         now = datetime.now(timezone.utc).isoformat()
@@ -101,6 +101,7 @@ class CosmosSessionStore:
             "id": session_id,
             "user_id": user_id,
             "title": title,
+            "demo_mode": demo_mode,
             "created_at": now,
             "updated_at": now,
             "message_count": 0,
@@ -121,7 +122,7 @@ class CosmosSessionStore:
     async def list_sessions(self, user_id: str) -> list[dict]:
         """Return lightweight session summaries (no messages) sorted newest-first."""
         query = (
-            "SELECT c.id, c.user_id, c.title, c.created_at, c.updated_at, c.message_count "
+            "SELECT c.id, c.user_id, c.title, c.created_at, c.updated_at, c.message_count, c.demo_mode "
             "FROM c WHERE c.user_id = @uid ORDER BY c.updated_at DESC"
         )
         items: list[dict] = []

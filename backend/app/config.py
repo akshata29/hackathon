@@ -84,6 +84,12 @@ class Settings(BaseSettings):
     portfolio_mcp_url: str = "http://localhost:8002"
     mcp_auth_token: str = "dev-portfolio-mcp-token"  # Shared bearer token for internal MCP servers
 
+    # Demo / Cross-IDP mode helpers (local dev only)
+    # mock_oidc_url: URL of the mock Okta-like OIDC server (Option B/C demos)
+    # okta_proxy_url: URL of the Okta→MCP proxy for Option C demo
+    mock_oidc_url: str = "http://localhost:8889"
+    okta_proxy_url: str = "http://localhost:8003"
+
     # Remote hosted MCP server — Alpha Vantage (economic indicators, stocks, fundamentals)
     # Endpoint: https://mcp.alphavantage.co/mcp?apikey=<key>  — no local server needed
     alphavantage_mcp_url: str = "https://mcp.alphavantage.co/mcp"

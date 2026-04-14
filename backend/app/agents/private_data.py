@@ -58,6 +58,8 @@ class PrivateDataAgent(BaseAgent):
         mcp_auth_token: str | None = None,
         raw_token: str | None = None,
         settings=None,
+        demo_mode: str = "entra",
+        mock_oidc_token: str | None = None,
         **kwargs,
     ) -> list:
         """
@@ -69,6 +71,12 @@ class PrivateDataAgent(BaseAgent):
 
         Security (dev mode): plain bearer with static MCP_AUTH_TOKEN.
 
+        Security (demo modes):
+          "multi-idp"  — presents a mock Okta JWT directly; MCP validates via
+                         MultiIDPTokenVerifier (requires TRUSTED_ISSUERS=http://localhost:8888).
+          "okta-proxy" — routes through the Okta proxy (settings.okta_proxy_url);
+                         proxy validates the mock JWT and swaps in a service token.
+
         Note: Yahoo Finance serves public market data so there is no per-user RLS;
         the OBO token still enforces that only authorized backends can call the MCP
         and provides an audit trail of which user triggered the request.
@@ -77,20 +85,31 @@ class PrivateDataAgent(BaseAgent):
         from agent_framework import MCPStreamableHTTPTool
         from app.core.auth.obo import build_obo_http_client
 
-        mcp_client_id = getattr(settings, "yahoo_mcp_client_id", "") if settings else ""
+        # Determine effective MCP URL — proxy intercepts in okta-proxy mode
+        if demo_mode == "okta-proxy" and settings:
+            effective_url = getattr(settings, "okta_proxy_url", yahoo_mcp_url)
+        else:
+            effective_url = yahoo_mcp_url
 
-        http_client = build_obo_http_client(
-            settings=settings,
-            raw_token=raw_token,
-            mcp_client_id=mcp_client_id,
-            scope_name="market.read",
-            fallback_bearer=mcp_auth_token or "",
-        )
+        # Build the HTTP client — mock token in demo modes, OBO in production
+        if demo_mode in ("multi-idp", "okta-proxy") and mock_oidc_token:
+            http_client = httpx.AsyncClient(
+                headers={"Authorization": f"Bearer {mock_oidc_token}"}
+            )
+        else:
+            mcp_client_id = getattr(settings, "yahoo_mcp_client_id", "") if settings else ""
+            http_client = build_obo_http_client(
+                settings=settings,
+                raw_token=raw_token,
+                mcp_client_id=mcp_client_id,
+                scope_name="market.read",
+                fallback_bearer=mcp_auth_token or "",
+            )
 
         return [
             MCPStreamableHTTPTool(
                 name="YahooFinanceData",
-                url=f"{yahoo_mcp_url}/mcp",
+                url=f"{effective_url}/mcp",
                 approval_mode="never_require",
                 http_client=http_client,
             )
@@ -101,12 +120,15 @@ class PrivateDataAgent(BaseAgent):
     def create_from_context(cls, ctx: "AgentBuildContext"):
         """Registry hook — extract Yahoo Finance MCP config from settings."""
         from app.core.agents.base import AgentBuildContext  # noqa: F401
+        mock_oidc_tokens = getattr(ctx, "mock_oidc_tokens", {})
         return cls.create(
             ctx.client,
             yahoo_mcp_url=ctx.settings.yahoo_mcp_url,
             mcp_auth_token=ctx.settings.mcp_auth_token,
             raw_token=ctx.raw_token,
             settings=ctx.settings,
+            demo_mode=getattr(ctx, "demo_mode", "entra"),
+            mock_oidc_token=mock_oidc_tokens.get("yahoo"),
         )
 
 

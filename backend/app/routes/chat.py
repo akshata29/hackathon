@@ -26,10 +26,24 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+_VALID_DEMO_MODES = {"entra", "multi-idp", "okta-proxy"}
+
+
 class ChatRequest(BaseModel):
     message: str
     session_id: str | None = None
     mode: str = "handoff"  # "handoff" | "comprehensive"
+    # demo_mode controls which auth path the backend uses to reach MCP servers:
+    #   "entra"      — default; Entra OBO token exchange (production flow)
+    #   "multi-idp"  — Option B; backend presents a mock Okta JWT directly to MCP
+    #                  (MCP uses MultiIDPTokenVerifier to validate both Entra + Okta)
+    #   "okta-proxy" — Option C; Yahoo Finance calls routed through the Okta proxy
+    #                  (proxy validates mock Okta JWT and swaps in a service token)
+    demo_mode: str = "entra"
+
+    def model_post_init(self, __context) -> None:
+        if self.demo_mode not in _VALID_DEMO_MODES:
+            self.demo_mode = "entra"
 
 
 class ChatResponse(BaseModel):
@@ -74,7 +88,7 @@ async def chat_message(
             if existing:
                 prior_messages = existing.get("messages", [])
             else:
-                await store.create_session(session_id, user_id, title)
+                await store.create_session(session_id, user_id, title, demo_mode=request.demo_mode)
             await store.append_message(session_id, user_id, "user", request.message)
         except Exception as exc:
             logger.warning("Failed to persist user message to CosmosDB: %s", exc)
@@ -96,6 +110,7 @@ async def chat_message(
                         user_token=user_id,
                         raw_token=raw_token,
                         history=prior_messages or None,
+                        demo_mode=request.demo_mode,
                     )
                 else:
                     gen = orchestrator.run_handoff(
@@ -104,6 +119,7 @@ async def chat_message(
                         user_token=user_id,
                         raw_token=raw_token,
                         history=prior_messages or None,
+                        demo_mode=request.demo_mode,
                     )
 
                 async for event in gen:
@@ -119,6 +135,13 @@ async def chat_message(
                             }
                         )
                     yield f"data: {json.dumps(event)}\n\n"
+        except Exception as exc:  # noqa: BLE001
+            # Emit an error event so the client can show a message, then let
+            # the generator exit normally.  Re-raising would cause Starlette to
+            # abort the chunked response mid-stream, giving browsers
+            # ERR_INCOMPLETE_CHUNKED_ENCODING.
+            logger.exception("Unhandled error in chat event_stream: %s", exc)
+            yield f"data: {json.dumps({'type': 'error', 'content': str(exc)})}\n\n"
         finally:
             # Persist assistant response — authenticated users only
             if accumulated_content and store:
@@ -138,8 +161,7 @@ async def chat_message(
                     await store.close()
                 except Exception:
                     pass
-
-        yield "data: [DONE]\n\n"
+            yield "data: [DONE]\n\n"
 
     return StreamingResponse(
         event_stream(),

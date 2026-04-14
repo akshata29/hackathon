@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { useMsal } from '@azure/msal-react'
-import { loginRequest } from '../authConfig'
+import { loginRequest, tokenRequest } from '../authConfig'
 
 // =========================================================================
 // AuthFlowPanel
@@ -21,8 +21,9 @@ type CredentialType =
   | 'entra-jwt' | 'obo-portfolio' | 'obo-market'
   | 'api-key' | 'github-oauth' | 'managed-identity'
   | 'json-rpc' | 'none' | 'internal'
+  | 'mock-oidc' | 'client-creds'
 
-type PatternKey = '1a' | '1b' | '2' | 'foundry' | 'a2a' | 'concurrent' | 'handoff'
+type PatternKey = '1a' | '1b' | '2' | 'foundry' | 'a2a' | 'concurrent' | 'handoff' | 'multi-idp' | 'okta-proxy'
 type SecurityLevel = 'PUBLIC' | 'CONFIDENTIAL' | 'INTERNAL'
 
 interface FlowStep {
@@ -78,6 +79,8 @@ const CRED_STYLES: Record<CredentialType, { bg: string; text: string; ring: stri
   'json-rpc':         { bg: 'bg-lime-950',   text: 'text-lime-300',   ring: 'ring-lime-700/50'   },
   'none':             { bg: 'bg-gray-900',   text: 'text-gray-500',   ring: 'ring-gray-700/50'   },
   'internal':         { bg: 'bg-gray-900',   text: 'text-gray-400',   ring: 'ring-gray-600/50'   },
+  'mock-oidc':        { bg: 'bg-orange-950', text: 'text-orange-300', ring: 'ring-orange-700/50' },
+  'client-creds':     { bg: 'bg-violet-950', text: 'text-violet-300', ring: 'ring-violet-700/50' },
 }
 
 const SEC_STYLES: Record<SecurityLevel, { bg: string; text: string; ring: string; dot: string }> = {
@@ -94,6 +97,8 @@ const PATTERN_STYLES: Record<PatternKey, { bg: string; text: string; ring: strin
   'a2a':       { bg: 'bg-lime-950',    text: 'text-lime-300',    ring: 'ring-lime-700/50'    },
   'concurrent':{ bg: 'bg-rose-950',    text: 'text-rose-300',    ring: 'ring-rose-700/50'    },
   'handoff':   { bg: 'bg-indigo-950',  text: 'text-indigo-300',  ring: 'ring-indigo-700/50'  },
+  'multi-idp': { bg: 'bg-orange-950',  text: 'text-orange-300',  ring: 'ring-orange-700/50'  },
+  'okta-proxy':{ bg: 'bg-rose-950',    text: 'text-rose-300',    ring: 'ring-rose-700/50'    },
 }
 
 // --- Flow definitions per agent ---
@@ -547,19 +552,110 @@ const FLOWS: Record<string, FlowDef> = {
       'Prompt injection defense is layered: guardrail middleware + explicit SECURITY RULES in triage system prompt.',
     ],
   },
+
+  // ── Multi-IDP / Okta Proxy demo variants ────────────────────────────────
+
+  'private_data_agent__multi-idp': {
+    pattern: 'multi-idp',
+    patternLabel: 'Option B: Multi-IDP + Mock Okta JWT (market.read)',
+    securityLevel: 'PUBLIC',
+    description: 'Instead of Entra OBO, the backend requests a mock Okta JWT from the mock-OIDC server (simulating Copilot Studio). Yahoo Finance MCP validates it via MultiIDPTokenVerifier — auto-discovering JWKS from the trusted issuer. Zero code change to the MCP; only TRUSTED_ISSUERS env var is set.',
+    highlightOBO: false,
+    steps: [
+      { nodeType: 'browser',    title: 'Browser / SPA',          subtitle: 'Optional Entra token',                 detail: 'Market data is public. demo_mode=multi-idp in request body tells the backend to use the mock Okta flow instead of OBO.',                                                                                              fileRef: 'frontend/src/components/ChatPanel.tsx' },
+      { nodeType: 'backend',    title: 'FastAPI Backend',         subtitle: 'POST /token to mock-OIDC',            detail: '_fetch_mock_oidc_tokens(): POST http://localhost:8889/token with sub=user_email, audience=api://<yahoo-mcp-client-id>, scope=market.read. Two tokens fetched (yahoo + portfolio).',                               fileRef: 'backend/app/workflows/portfolio_workflow.py:_fetch_mock_oidc_tokens' },
+      { nodeType: 'external',   title: 'Mock OIDC Server',        subtitle: 'Simulates Okta / Copilot Studio IDP', detail: 'RS256 JWT: iss=http://localhost:8889, aud=api://<yahoo-mcp-client-id>, scp=market.read. RSA key generated at startup; JWKS served at /keys. OIDC discovery at /.well-known/openid-configuration.',              fileRef: 'mcp-servers/mock-oidc/server.py:_mint_token' },
+      { nodeType: 'mcp-public', title: 'Yahoo Finance MCP',       subtitle: 'MultiIDPTokenVerifier',               detail: 'TRUSTED_ISSUERS=http://localhost:8889. Auto-discovers JWKS, validates RS256, checks aud. check_scope("market.read") reads scp from _request_claims ContextVar set by verifier.',                               fileRef: 'mcp-servers/yahoo-finance/entra_auth.py:MultiIDPTokenVerifier' },
+      { nodeType: 'data',       title: 'yfinance / Yahoo Finance', subtitle: 'Public market data',                 detail: 'Same yfinance tools as Entra mode. Token validation is the only difference — data retrieval is identical.',                                                                                                         fileRef: 'mcp-servers/yahoo-finance/server.py' },
+    ],
+    arrows: [
+      { credential: 'none',      label: 'No token (public data)' },
+      { credential: 'mock-oidc', label: 'POST /token — sub, audience, scope' },
+      { credential: 'mock-oidc', label: 'RS256 JWT (iss=mock-oidc, scp=market.read)' },
+      { credential: 'mock-oidc', label: 'JWKS validated + scope checked' },
+    ],
+    observations: [
+      'TRUSTED_ISSUERS env var activates MultiIDPTokenVerifier — zero MCP code changes required.',
+      'Mock OIDC simulates the Copilot Studio Okta IDP; the MCP cannot distinguish it from a real Okta token.',
+      '_request_claims ContextVar bridges verifier and tool functions — no fragile header re-parsing.',
+    ],
+  },
+
+  'private_data_agent__okta-proxy': {
+    pattern: 'okta-proxy',
+    patternLabel: 'Option C: Okta Proxy + Token Swap (client_credentials)',
+    securityLevel: 'PUBLIC',
+    description: 'Backend sends mock Okta JWT to the Okta proxy (localhost:8003). Proxy validates via mock-OIDC JWKS, maps user identity, then calls Entra client_credentials to obtain a real service token for Yahoo Finance MCP. No second login prompt for Copilot Studio users.',
+    highlightOBO: false,
+    steps: [
+      { nodeType: 'browser',    title: 'Browser / SPA',          subtitle: 'Optional Entra token',               detail: 'demo_mode=okta-proxy routes Yahoo Finance calls through the Okta proxy. Backend already holds the mock JWT.',                                                                                                             fileRef: 'frontend/src/components/ChatPanel.tsx' },
+      { nodeType: 'backend',    title: 'FastAPI Backend',         subtitle: 'Routes to okta-proxy URL',           detail: 'PrivateDataAgent.build_tools(): effective_url=settings.okta_proxy_url (http://localhost:8003). Bearer = mock Okta JWT. MCP client transparently connects to the proxy.',                                            fileRef: 'backend/app/agents/private_data.py:build_tools' },
+      { nodeType: 'external',   title: 'Okta Proxy',              subtitle: 'Validates + token swap',             detail: 'Validates mock JWT via mock-OIDC JWKS discovery. Maps sub (demo@hackathon.local). Calls Entra /token with client_credentials (api://<MCP_CLIENT_ID>/.default). Caches service token with 60s TTL buffer.',          fileRef: 'mcp-servers/okta-proxy/server.py:proxy' },
+      { nodeType: 'entra',      title: 'Entra Token Exchange',    subtitle: 'client_credentials grant',           detail: 'POST /oauth2/v2.0/token grant_type=client_credentials. Returns v1 STS token: iss=sts.windows.net/{tid}/, roles=[mcp.call]. User identity forwarded via X-MCP-User-Id header.',                                    fileRef: 'mcp-servers/okta-proxy/server.py:_get_entra_service_token' },
+      { nodeType: 'mcp-public', title: 'Yahoo Finance MCP',       subtitle: 'v1 STS + mcp.call role',            detail: 'MultiIDPTokenVerifier: entra_v1_issuer (sts.windows.net) added to trusted list. Validates via Entra JWKS. check_scope accepts roles=[mcp.call] as blanket app permission.',                                        fileRef: 'mcp-servers/yahoo-finance/entra_auth.py:MultiIDPTokenVerifier' },
+      { nodeType: 'data',       title: 'yfinance / Yahoo Finance', subtitle: 'Public market data',                detail: 'Same data as Entra mode. User identity from X-MCP-User-Id logged for audit trail.',                                                                                                                                 fileRef: 'mcp-servers/yahoo-finance/server.py' },
+    ],
+    arrows: [
+      { credential: 'none',         label: 'No token (public data)' },
+      { credential: 'mock-oidc',    label: 'Bearer mock-Okta JWT to proxy' },
+      { credential: 'mock-oidc',    label: 'JWKS validated, user mapped' },
+      { credential: 'client-creds', label: 'Entra service token (roles: mcp.call)' },
+      { credential: 'client-creds', label: 'v1 STS validated + mcp.call role' },
+    ],
+    observations: [
+      'Proxy solves Copilot Studio double-auth: users never see a second login prompt.',
+      'client_credentials token carries roles=[mcp.call] — accepted by check_scope() as blanket app permission.',
+      'sts.windows.net v1 issuer explicitly trusted — client_credentials always uses v1; OBO uses v2.',
+    ],
+  },
+
+  'portfolio_agent__multi-idp': {
+    pattern: 'multi-idp',
+    patternLabel: 'Option B: Multi-IDP + Mock Okta JWT (portfolio.read)',
+    securityLevel: 'CONFIDENTIAL',
+    description: 'Instead of Entra OBO, the backend fetches a mock Okta JWT for portfolio.read scope. Portfolio DB MCP validates via MultiIDPTokenVerifier. User sub (demo@hackathon.local) from the mock JWT is used for row-level security — same SQL enforcement as Entra mode.',
+    highlightOBO: false,
+    steps: [
+      { nodeType: 'browser',     title: 'Browser (MSAL)',          subtitle: 'Entra token (user identity)',   detail: 'Entra token identifies the user. OID/email used as sub when minting the mock JWT. demo_mode=multi-idp skips the OBO exchange.',                                                                                          fileRef: 'frontend/src/authConfig.ts' },
+      { nodeType: 'backend',     title: 'FastAPI Backend',          subtitle: 'POST /token to mock-OIDC',     detail: '_fetch_mock_oidc_tokens(): POST http://localhost:8889/token with audience=api://<portfolio-mcp-client-id>, scope=portfolio.read, sub=user_email or demo@hackathon.local.',                                            fileRef: 'backend/app/workflows/portfolio_workflow.py:_fetch_mock_oidc_tokens' },
+      { nodeType: 'external',    title: 'Mock OIDC Server',         subtitle: 'Simulates Okta IDP',           detail: 'RS256 JWT: iss=http://localhost:8889, aud=api://<portfolio-mcp-client-id>, scp=portfolio.read, sub=demo@hackathon.local.',                                                                                            fileRef: 'mcp-servers/mock-oidc/server.py:_mint_token' },
+      { nodeType: 'mcp-private', title: 'Portfolio DB MCP',         subtitle: 'MultiIDPTokenVerifier + RLS',  detail: 'TRUSTED_ISSUERS=http://localhost:8889. check_scope("portfolio.read") validates scp. get_user_id_from_request() reads sub from _request_claims ContextVar for SQL RLS.',                                              fileRef: 'mcp-servers/portfolio-db/entra_auth.py:MultiIDPTokenVerifier' },
+      { nodeType: 'data',        title: 'SQLite / Fabric',          subtitle: 'SQL Row-Level Security',       detail: 'WHERE user_id = demo@hackathon.local — same RLS enforcement as Entra mode; only identity source changes from oid to sub.',                                                                                             fileRef: 'mcp-servers/portfolio-db/server.py:_db_get_holdings' },
+    ],
+    arrows: [
+      { credential: 'entra-jwt', label: 'Bearer Entra JWT (identify user)' },
+      { credential: 'mock-oidc', label: 'POST /token — sub=user, audience, scp' },
+      { credential: 'mock-oidc', label: 'RS256 JWT (scp=portfolio.read)' },
+      { credential: 'mock-oidc', label: 'JWKS validated + scope + RLS' },
+    ],
+    observations: [
+      'Row-level security still enforced — identity source changes from Entra oid to mock JWT sub claim.',
+      'MultiIDPTokenVerifier is drop-in: only TRUSTED_ISSUERS env var changes, no MCP code modifications.',
+      'In production: replace mock-OIDC URL with real Okta issuer in TRUSTED_ISSUERS.',
+    ],
+  },
 }
 
 // --- Agent name normalization ---
 
-function getFlow(agent: string): FlowDef | null {
+function getFlow(agent: string, demoMode?: string): FlowDef | null {
   if (!agent) return null
-  return (
-    FLOWS[agent] ??
-    FLOWS[agent + '_agent'] ??
-    FLOWS[agent.replace(/_agent$/, '') + '_agent'] ??
-    FLOWS[agent.replace(/_agent$/, '')] ??
-    null
-  )
+  const candidates = [
+    agent,
+    agent + '_agent',
+    agent.replace(/_agent$/, '') + '_agent',
+    agent.replace(/_agent$/, ''),
+  ]
+  for (const key of candidates) {
+    if (FLOWS[key]) {
+      if (demoMode && demoMode !== 'entra') {
+        const variant = FLOWS[`${key}__${demoMode}`]
+        if (variant) return variant
+      }
+      return FLOWS[key]
+    }
+  }
+  return null
 }
 
 // --- JWT decode (base64 payload only — display purposes, no signature verification) ---
@@ -740,7 +836,7 @@ function ClaimsViewer({ flow }: ClaimsViewerProps) {
     if (fetchedRef.current || !accounts.length) return
     fetchedRef.current = true
     instance
-      .acquireTokenSilent({ ...loginRequest, account: accounts[0] })
+      .acquireTokenSilent({ ...tokenRequest, account: accounts[0] })
       .then((r) => setClaims(decodeJWT(r.accessToken)))
       .catch(() => {})
   }, [accounts, instance])
@@ -865,14 +961,15 @@ interface AuthFlowPanelProps {
   agent: string
   open: boolean
   onClose: () => void
+  demoMode?: string
 }
 
-export function AuthFlowPanel({ agent, open, onClose }: AuthFlowPanelProps) {
+export function AuthFlowPanel({ agent, open, onClose, demoMode }: AuthFlowPanelProps) {
   const [activeStep, setActiveStep] = useState<number | null>(null)
   const [showClaims, setShowClaims] = useState(false)
   const [showObs, setShowObs] = useState(false)
 
-  const flow = getFlow(agent)
+  const flow = getFlow(agent, demoMode)
 
   if (!open || !flow) return null
 
@@ -897,6 +994,11 @@ export function AuthFlowPanel({ agent, open, onClose }: AuthFlowPanelProps) {
           <span className={`w-1.5 h-1.5 rounded-full ${secStyle.dot} inline-block`} />
           {flow.securityLevel}
         </span>
+        {demoMode && demoMode !== 'entra' && (
+          <span className={`${demoMode === 'okta-proxy' ? 'bg-rose-950 text-rose-300 ring-rose-700/50' : 'bg-orange-950 text-orange-300 ring-orange-700/50'} ring-1 rounded-full px-2 py-0.5 text-[9px] font-semibold`}>
+            {demoMode === 'multi-idp' ? 'Multi-IDP demo' : 'Okta Proxy demo'}
+          </span>
+        )}
         <button
           onClick={onClose}
           className="ml-auto text-gray-600 hover:text-gray-300 transition-colors p-0.5 rounded hover:bg-gray-700/60"

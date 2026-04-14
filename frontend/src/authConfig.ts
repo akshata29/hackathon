@@ -25,21 +25,21 @@ export const msalConfig: Configuration = {
   },
 }
 
-// Scopes for sign-in.
-// 'openid profile email' gives us the ID token and basic user info.
-// The backend API scope (Chat.Read) scopes the access token so the backend can
-// validate it as audience=ENTRA_BACKEND_CLIENT_ID and perform the OBO exchange
-// for downstream MCP servers.  Falls back gracefully when VITE_ENTRA_BACKEND_CLIENT_ID
-// is not set (local dev without Entra configured).
+// Scopes for sign-in — Chat.Read is the delegated permission on the backend API.
+// Including it here means MSAL acquires the backend-scoped access token at login,
+// so acquireTokenSilent(tokenRequest) always hits cache on subsequent calls.
+// openid/profile/email are OIDC scopes that produce the ID token (for accounts[0].name/username).
+// NOTE: User.Read (Graph resource) is intentionally omitted — mixing resources in one
+// loginRequest is rejected by MSAL. User display info comes from the ID token instead.
 export const loginRequest = {
-  scopes: [
-    'openid',
-    'profile',
-    'email',
-    ...(import.meta.env.VITE_ENTRA_BACKEND_CLIENT_ID
-      ? [`api://${import.meta.env.VITE_ENTRA_BACKEND_CLIENT_ID}/Chat.Read`]
-      : []),
-  ],
+  scopes: ['openid', 'profile', 'email', `api://${import.meta.env.VITE_ENTRA_CLIENT_ID || 'fb3c0e70-f3bb-46a1-9f0b-2587b49a3d0c'}/Chat.Read`],
+}
+
+// Scopes for backend API calls — same resource as loginRequest so the token is
+// always available from MSAL cache without an extra network round-trip.
+// Token issued with aud=api://<clientId>, usable as an OBO assertion.
+export const tokenRequest = {
+  scopes: [`api://${import.meta.env.VITE_ENTRA_CLIENT_ID || 'fb3c0e70-f3bb-46a1-9f0b-2587b49a3d0c'}/Chat.Read`],
 }
 
 export const backendUrl =

@@ -12,6 +12,9 @@
 # In production: replace _load_from_db() with Fabric/SQL query.
 # ============================================================
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import logging
 import os
 import re
@@ -27,8 +30,11 @@ from entra_auth import (
     MultiIDPTokenVerifier,
     audit_log,
     check_content_safety,
+    check_injection_patterns,
     check_scope,
     get_user_id_from_request,
+    make_prm_app,
+    MCP_CLIENT_ID,
 )
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -451,6 +457,7 @@ def get_transactions(symbol: str = "", limit: int = 20) -> dict:
     try:
         check_scope("portfolio.read")
         if symbol:
+            check_injection_patterns(symbol)
             check_content_safety(symbol)
         limit = min(max(1, limit), 100)
         if symbol:
@@ -506,6 +513,7 @@ def get_holding_detail(symbol: str) -> dict:
     _err: str | None = None
     try:
         check_scope("portfolio.read")
+        check_injection_patterns(symbol)
         check_content_safety(symbol)
         symbol = _validate_symbol(symbol)
         portfolio = _get_portfolio(user_id)
@@ -592,4 +600,21 @@ if __name__ == "__main__":
         asyncio.get_event_loop().set_exception_handler(_suppress_connection_reset)
 
     port = int(os.getenv("PORT", "8002"))
-    uvicorn.run(mcp.http_app(stateless_http=True), host="0.0.0.0", port=port)
+
+    # Configure Azure Monitor OpenTelemetry — Camp 4: Monitoring & Telemetry
+    # Conditional on APPLICATIONINSIGHTS_CONNECTION_STRING; no-op in dev.
+    # Enables unified telemetry (request tracing + custom_dimensions) in
+    # Application Insights alongside the backend and yahoo-finance MCP server.
+    _conn_str = os.getenv("APPLICATIONINSIGHTS_CONNECTION_STRING")
+    if _conn_str:
+        try:
+            from azure.monitor.opentelemetry import configure_azure_monitor
+            configure_azure_monitor(
+                connection_string=_conn_str,
+                logger_name="portfolio-db-mcp",
+            )
+            logger.info("Azure Monitor OpenTelemetry configured (portfolio-db-mcp)")
+        except Exception as _otel_exc:
+            logger.warning("Azure Monitor setup failed (non-blocking): %s", _otel_exc)
+
+    uvicorn.run(make_prm_app(mcp, scopes=["portfolio.read"]), host="0.0.0.0", port=port)

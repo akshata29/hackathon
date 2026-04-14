@@ -8,10 +8,17 @@ import './index.css'
 
 const msalInstance = new PublicClientApplication(msalConfig)
 
-ReactDOM.createRoot(document.getElementById('root')!).render(
-  <React.StrictMode>
-    <MsalProvider instance={msalInstance}>
-      <App />
-    </MsalProvider>
-  </React.StrictMode>,
-)
+msalInstance.initialize().then(() => {
+  // Clear any stale MSAL interaction lock left by a previous failed popup.
+  // Without this, a page refresh mid-popup leaves 'interaction_in_progress'
+  // locked in sessionStorage and every subsequent loginPopup call throws.
+  sessionStorage.removeItem('msal.interaction.status')
+
+  ReactDOM.createRoot(document.getElementById('root')!).render(
+    <React.StrictMode>
+      <MsalProvider instance={msalInstance}>
+        <App />
+      </MsalProvider>
+    </React.StrictMode>,
+  )
+})

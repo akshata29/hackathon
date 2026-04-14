@@ -8,6 +8,9 @@
 #       Token is OBO-issued by the backend; validated via JWKS here.
 # ============================================================
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import logging
 import os
 import re
@@ -24,8 +27,12 @@ from entra_auth import (
     MultiIDPTokenVerifier,
     audit_log,
     check_content_safety,
+    check_injection_patterns,
     check_scope,
     get_caller_id,
+    make_prm_app,
+    MCP_CLIENT_ID,
+    scan_output_credentials,
 )
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -98,6 +105,7 @@ def get_quote(symbol: str) -> dict:
     _err: str | None = None
     try:
         check_scope("market.read")
+        check_injection_patterns(symbol)
         check_content_safety(symbol)
         symbol = _validate_symbol(symbol)
         ticker = yf.Ticker(symbol)
@@ -147,6 +155,7 @@ def get_financials(symbol: str) -> dict:
     _err: str | None = None
     try:
         check_scope("market.read")
+        check_injection_patterns(symbol)
         check_content_safety(symbol)
         symbol = _validate_symbol(symbol)
         info = yf.Ticker(symbol).info
@@ -200,6 +209,7 @@ def get_news(symbol: str, max_items: int = 5) -> list[dict]:
     _err: str | None = None
     try:
         check_scope("market.read")
+        check_injection_patterns(symbol)
         check_content_safety(symbol)
         symbol = _validate_symbol(symbol)
         max_items = min(max(1, max_items), 10)
@@ -216,7 +226,8 @@ def get_news(symbol: str, max_items: int = 5) -> list[dict]:
                 "summary": content.get("summary", ""),
             })
         _outcome = "success"
-        return results
+        import json as _json
+        return _json.loads(scan_output_credentials(_json.dumps(results)))
     except (PermissionError, ValueError) as exc:
         _outcome = "denied"
         _err = str(exc)
@@ -246,6 +257,7 @@ def get_analyst_ratings(symbol: str) -> dict:
     _err: str | None = None
     try:
         check_scope("market.read")
+        check_injection_patterns(symbol)
         check_content_safety(symbol)
         symbol = _validate_symbol(symbol)
         info = yf.Ticker(symbol).info
@@ -292,7 +304,9 @@ def compare_stocks(symbols: list[str], metric: str = "pe_ratio") -> list[dict]:
     try:
         check_scope("market.read")
         for s in symbols[:5]:
+            check_injection_patterns(s)
             check_content_safety(s)
+        check_injection_patterns(metric)
         check_content_safety(metric)
         symbols = [_validate_symbol(s) for s in symbols[:5]]
         if metric not in _VALID_METRICS:
@@ -343,4 +357,21 @@ if __name__ == "__main__":
         asyncio.get_event_loop().set_exception_handler(_suppress_connection_reset)
 
     port = int(os.getenv("PORT", "8001"))
-    uvicorn.run(mcp.http_app(stateless_http=True), host="0.0.0.0", port=port)
+
+    # Configure Azure Monitor OpenTelemetry — Camp 4: Monitoring & Telemetry
+    # Conditional on APPLICATIONINSIGHTS_CONNECTION_STRING; no-op in dev.
+    # Enables unified telemetry (request tracing + custom_dimensions) in
+    # Application Insights alongside the backend and portfolio-db MCP server.
+    _conn_str = os.getenv("APPLICATIONINSIGHTS_CONNECTION_STRING")
+    if _conn_str:
+        try:
+            from azure.monitor.opentelemetry import configure_azure_monitor
+            configure_azure_monitor(
+                connection_string=_conn_str,
+                logger_name="yahoo-finance-mcp",
+            )
+            logger.info("Azure Monitor OpenTelemetry configured (yahoo-finance-mcp)")
+        except Exception as _otel_exc:
+            logger.warning("Azure Monitor setup failed (non-blocking): %s", _otel_exc)
+
+    uvicorn.run(make_prm_app(mcp, scopes=["market.read"]), host="0.0.0.0", port=port)
