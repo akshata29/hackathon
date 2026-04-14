@@ -5,7 +5,7 @@ import { Dashboard } from './components/Dashboard'
 import { NavBar } from './components/NavBar'
 
 type Tab = 'chat' | 'dashboard'
-export type DemoMode = 'entra' | 'multi-idp' | 'okta-proxy'
+export type DemoMode = 'entra' | 'multi-idp' | 'okta-proxy' | 'entra-agent'
 
 export default function App() {
   const isAuthenticated = useIsAuthenticated()

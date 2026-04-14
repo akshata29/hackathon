@@ -121,7 +121,89 @@ class AgentA(BaseAgent):
             return [MCPStreamableHTTPTool(name="MyTool", url=f"{mcp_url}/mcp",
                                           approval_mode="never_require", http_client=http_client)]
 
-        Option c — Hosted Foundry Prompt Agent (override create() instead of build_tools):
+        Option b — MCPStreamableHTTPTool with OBO (private MCP, Pattern 1a):
+            The backend exchanges the user's Entra Bearer token for an OBO token
+            scoped to the MCP server's app registration.  The MCP server validates
+            the OBO token via JWKS and enforces row-level security from the ``oid``.
+
+            import httpx
+            from agent_framework import MCPStreamableHTTPTool
+            from app.core.auth.obo import build_obo_http_client
+
+            # kwargs must include: mcp_url, raw_token, mcp_auth_token (dev fallback), settings
+            mcp_url      = kwargs["mcp_url"]
+            raw_token    = kwargs.get("raw_token")
+            fallback_tok = kwargs.get("mcp_auth_token", "dev-my-mcp-token")
+            settings     = kwargs.get("settings")
+
+            # Production: OBO exchange --> MCP receives a user-bound token
+            # Dev mode:   plain Bearer fallback (when ENTRA_CLIENT_SECRET not set)
+            http_client = build_obo_http_client(
+                settings=settings,
+                raw_token=raw_token,
+                mcp_client_id=settings.my_mcp_client_id if settings else "",
+                scope_name="my-scope.read",
+                fallback_bearer=fallback_tok,
+            ) if settings else httpx.AsyncClient(
+                headers={"Authorization": f"Bearer {fallback_tok}"}
+            )
+
+            return [MCPStreamableHTTPTool(
+                url=mcp_url,
+                http_client=http_client,
+            )]
+
+        Option b2 — MCPStreamableHTTPTool with Agent Identity (Option D — entra-agent mode):
+            The backend authenticates as the agent itself — no user OBO, no stored
+            client secret.  Uses DefaultAzureCredential which resolves to:
+              - Managed Identity + Foundry blueprint federated credential (Azure production)
+              - az login / EnvironmentCredential (local dev — stand-in SP)
+            The MCP server validates via AgentIdentityTokenVerifier (oid-pinned, no scp).
+            No per-user row-level security is possible — the token has no user oid.
+
+            WHEN TO USE: agent batch workflows, single-tenant demos, any flow where the
+            backend acts autonomously without a user context.  Not for multi-user
+            data isolation — use OBO (Option b) for that.
+
+            LOCAL DEV CAVEAT: DefaultAzureCredential locally falls through to
+            AzureCliCredential (your az login user, a USER token — not app-only).
+            To get a true app-only token locally, configure EnvironmentCredential:
+              AZURE_CLIENT_ID=<stand-in-sp-app-id>
+              AZURE_CLIENT_SECRET=<stand-in-sp-secret>
+              AZURE_TENANT_ID=<tenant-id>
+            A Foundry-provisioned agent identity (isAgent=true in portal) only works
+            from Azure compute via the Managed Identity federated credential chain.
+
+            from agent_framework import MCPStreamableHTTPTool
+            from app.core.auth.agent_identity import build_agent_identity_http_client
+
+            demo_mode   = kwargs.get("demo_mode", "entra")
+            settings    = kwargs.get("settings")
+            mcp_url     = kwargs.get("mcp_url", "")
+            fallback_tok = kwargs.get("mcp_auth_token", "")
+
+            if demo_mode == "entra-agent":
+                mcp_client_id = getattr(settings, "my_mcp_client_id", "") if settings else ""
+                audience = f"api://{mcp_client_id}" if mcp_client_id else ""
+                http_client = build_agent_identity_http_client(
+                    settings=settings,
+                    audience=audience,
+                    fallback_bearer=fallback_tok,
+                )
+            else:
+                from app.core.auth.obo import build_obo_http_client
+                http_client = build_obo_http_client(
+                    settings=settings,
+                    raw_token=kwargs.get("raw_token"),
+                    mcp_client_id=getattr(settings, "my_mcp_client_id", "") if settings else "",
+                    scope_name="my-scope.read",
+                    fallback_bearer=fallback_tok,
+                )
+
+            return [MCPStreamableHTTPTool(
+                name="MyTool", url=f"{mcp_url}/mcp",
+                approval_mode="never_require", http_client=http_client,
+            )]
             Override the entire create() classmethod as shown in market_intel.py.
             Hosted agents have their tools configured server-side in Foundry portal.
 

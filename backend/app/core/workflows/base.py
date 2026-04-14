@@ -25,6 +25,7 @@
 #   Compaction: https://github.com/microsoft/agent-framework/tree/main/python/samples/02-agents/compaction
 # ============================================================
 
+import asyncio
 import logging
 from abc import ABC, abstractmethod
 from typing import AsyncIterator, ClassVar
@@ -32,6 +33,10 @@ from typing import AsyncIterator, ClassVar
 from app.config import Settings
 
 logger = logging.getLogger(__name__)
+
+# Maximum wall-clock seconds for a single handoff or comprehensive workflow run.
+# Prevents the UI from spinning forever when the LLM or an MCP tool hangs.
+_WORKFLOW_TIMEOUT_SECS = 120
 
 
 class BaseOrchestrator(ABC):
@@ -176,13 +181,37 @@ class BaseOrchestrator(ABC):
     # ------------------------------------------------------------------
 
     def build_triage_agent(self, context_providers=None):
-        """Build the triage / orchestrator agent using the shared FoundryChatClient."""
+        """Build the triage agent with instructions filled from the agent registry.
+
+        If ``triage_instructions`` contains the ``{AGENT_CAPABILITIES}`` placeholder,
+        it is replaced at runtime with a formatted block generated from
+        ``BaseAgent.registered_agents()`` — each entry includes the agent name,
+        description, and up to three example queries.  This keeps routing rules
+        automatically in sync with the actual registered agents.
+        """
         from agent_framework import Agent
+
+        instructions = self.triage_instructions
+        if "{AGENT_CAPABILITIES}" in instructions:
+            import app.agents  # ensure all agent modules are loaded (populates registry)
+            from app.core.agents.base import BaseAgent
+
+            lines = []
+            for cls in BaseAgent.registered_agents().values():
+                if not cls.name or not cls.description:
+                    continue
+                line = f"  {cls.name}: {cls.description}"
+                if cls.example_queries:
+                    examples = "; ".join(cls.example_queries[:3])
+                    line += f"\n    e.g. {examples}"
+                lines.append(line)
+            instructions = instructions.replace("{AGENT_CAPABILITIES}", "\n".join(lines))
+            logger.debug("Triage instructions generated for %d agents", len(lines))
 
         return Agent(
             client=self._client,
             name=self.triage_agent_name,
-            instructions=self.triage_instructions,
+            instructions=instructions,
             context_providers=context_providers or None,
             require_per_service_call_history_persistence=True,
         )
@@ -321,25 +350,33 @@ class BaseOrchestrator(ABC):
 
         run_input = self._build_run_input(message, history)
         try:
-            async for event in workflow.run(run_input, stream=True):
-                async for item in self._process_workflow_event(event):
-                    if item.get("type") == "handoff":
-                        # Specialist is taking over — flush triage buffer and yield
-                        handoff_seen = True
-                        for buffered in triage_buffer:
-                            yield buffered
-                        triage_buffer = []
-                        yield item
+            async with asyncio.timeout(_WORKFLOW_TIMEOUT_SECS):
+                async for event in workflow.run(run_input, stream=True):
+                    async for item in self._process_workflow_event(event):
+                        if item.get("type") == "handoff":
+                            # Specialist is taking over — flush triage buffer and yield
+                            handoff_seen = True
+                            for buffered in triage_buffer:
+                                yield buffered
+                            triage_buffer = []
+                            yield item
 
-                    elif item.get("type") == "agent_response" and not handoff_seen:
-                        # Still in triage phase — accumulate, do not emit yet
-                        triage_text += item.get("content", "")
-                        triage_buffer.append(item)
+                        elif item.get("type") == "agent_response" and not handoff_seen:
+                            # Still in triage phase — accumulate, do not emit yet
+                            triage_text += item.get("content", "")
+                            triage_buffer.append(item)
 
-                    else:
-                        # Status / error events, or post-handoff specialist tokens
-                        yield item
+                        else:
+                            # Status / error events, or post-handoff specialist tokens
+                            yield item
 
+        except asyncio.TimeoutError:
+            logger.error(
+                "Handoff workflow timed out after %s s (handoff_seen=%s)",
+                _WORKFLOW_TIMEOUT_SECS, handoff_seen,
+            )
+            yield {"type": "error", "message": f"Workflow timed out after {_WORKFLOW_TIMEOUT_SECS}s"}
+            return
         except Exception as exc:
             logger.exception("Handoff workflow error: %s", exc)
             yield {"type": "error", "message": str(exc)}
@@ -367,9 +404,13 @@ class BaseOrchestrator(ABC):
         workflow = self._build_concurrent_workflow(user_token=user_token, raw_token=raw_token)
         run_input = self._build_run_input(message, history)
         try:
-            async for event in workflow.run(run_input, stream=True):
-                async for item in self._process_workflow_event(event):
-                    yield item
+            async with asyncio.timeout(_WORKFLOW_TIMEOUT_SECS):
+                async for event in workflow.run(run_input, stream=True):
+                    async for item in self._process_workflow_event(event):
+                        yield item
+        except asyncio.TimeoutError:
+            logger.error("Comprehensive workflow timed out after %s s", _WORKFLOW_TIMEOUT_SECS)
+            yield {"type": "error", "message": f"Workflow timed out after {_WORKFLOW_TIMEOUT_SECS}s"}
         except Exception as exc:
             logger.exception("Concurrent workflow error: %s", exc)
             yield {"type": "error", "message": str(exc)}

@@ -171,6 +171,13 @@ class EconomicDataAgent(BaseAgent):
 
     name = "economic_agent"
     description = "Economic data: GDP, inflation, yield curve, Fed rates, commodities, forex"
+    example_queries: list = [
+        "What is the current Fed funds rate and 10-year treasury yield?",
+        "Show CPI and inflation trend over the last 12 months",
+        "What does the yield curve shape signal for recession risk?",
+        "How has GDP growth trended this year?",
+        "What are WTI crude oil prices doing?",
+    ]
     system_message = ECONOMIC_DATA_INSTRUCTIONS
 
     @classmethod

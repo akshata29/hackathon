@@ -21,9 +21,9 @@ type CredentialType =
   | 'entra-jwt' | 'obo-portfolio' | 'obo-market'
   | 'api-key' | 'github-oauth' | 'managed-identity'
   | 'json-rpc' | 'none' | 'internal'
-  | 'mock-oidc' | 'client-creds'
+  | 'mock-oidc' | 'client-creds' | 'agent-identity'
 
-type PatternKey = '1a' | '1b' | '2' | 'foundry' | 'a2a' | 'concurrent' | 'handoff' | 'multi-idp' | 'okta-proxy'
+type PatternKey = '1a' | '1b' | '2' | 'foundry' | 'a2a' | 'concurrent' | 'handoff' | 'multi-idp' | 'okta-proxy' | 'entra-agent'
 type SecurityLevel = 'PUBLIC' | 'CONFIDENTIAL' | 'INTERNAL'
 
 interface FlowStep {
@@ -81,6 +81,7 @@ const CRED_STYLES: Record<CredentialType, { bg: string; text: string; ring: stri
   'internal':         { bg: 'bg-gray-900',   text: 'text-gray-400',   ring: 'ring-gray-600/50'   },
   'mock-oidc':        { bg: 'bg-orange-950', text: 'text-orange-300', ring: 'ring-orange-700/50' },
   'client-creds':     { bg: 'bg-violet-950', text: 'text-violet-300', ring: 'ring-violet-700/50' },
+  'agent-identity':   { bg: 'bg-purple-950', text: 'text-purple-300', ring: 'ring-purple-700/50' },
 }
 
 const SEC_STYLES: Record<SecurityLevel, { bg: string; text: string; ring: string; dot: string }> = {
@@ -99,6 +100,7 @@ const PATTERN_STYLES: Record<PatternKey, { bg: string; text: string; ring: strin
   'handoff':   { bg: 'bg-indigo-950',  text: 'text-indigo-300',  ring: 'ring-indigo-700/50'  },
   'multi-idp': { bg: 'bg-orange-950',  text: 'text-orange-300',  ring: 'ring-orange-700/50'  },
   'okta-proxy':{ bg: 'bg-rose-950',    text: 'text-rose-300',    ring: 'ring-rose-700/50'    },
+  'entra-agent':{ bg: 'bg-purple-950', text: 'text-purple-300',  ring: 'ring-purple-700/50'  },
 }
 
 // --- Flow definitions per agent ---
@@ -107,9 +109,9 @@ const FLOWS: Record<string, FlowDef> = {
 
   economic_agent: {
     pattern: '1b',
-    patternLabel: 'Pattern 1b: External Public MCP + Backend API Key',
+    patternLabel: 'Pattern 1b: External Public REST API + Backend API Key',
     securityLevel: 'PUBLIC',
-    description: 'Alpha Vantage MCP is a remote SaaS endpoint. No user identity is propagated — this agent only returns public economic data. Auth uses a backend-held API key stored in Key Vault, injected via environment variable.',
+    description: 'Alpha Vantage REST API is called directly via httpx FunctionTools — no MCP server involved. No user identity is propagated; this agent returns only public economic data. Auth uses a backend-held API key stored in Key Vault, injected via environment variable.',
     highlightOBO: false,
     steps: [
       {
@@ -129,15 +131,15 @@ const FLOWS: Record<string, FlowDef> = {
       {
         nodeType: 'external',
         title: 'EconomicDataAgent',
-        subtitle: 'Builds MCPTool or FunctionTool',
-        detail: 'API key loaded from ALPHAVANTAGE_API_KEY env var (injected from Key Vault). If key is present: MCPStreamableHTTPTool. If absent: FunctionTool REST fallback. Key is a backend-only secret, never exposed to the browser.',
-        fileRef: 'backend/app/agents/economic_data.py:build_tools',
+        subtitle: 'Builds FunctionTools (direct REST)',
+        detail: 'API key loaded from ALPHAVANTAGE_API_KEY env var (Key Vault reference). _build_av_tools() creates 14 FunctionTools: get_federal_funds_rate, get_treasury_yield, get_cpi, get_inflation, get_real_gdp, get_wti_crude, etc. Each tool makes a direct httpx call to alphavantage.co/query. Key is backend-only, never exposed to the browser. No MCPStreamableHTTPTool — MCP approach was dropped due to tool_name collision errors.',
+        fileRef: 'backend/app/agents/economic_data.py:_build_av_tools',
       },
       {
         nodeType: 'external',
-        title: 'Alpha Vantage MCP',
-        subtitle: 'Remote SaaS — mcp.alphavantage.co',
-        detail: 'Publicly hosted MCP endpoint. API key in URL param (?apikey=). Tools: get_federal_funds_rate, get_treasury_yield, get_cpi, get_inflation, get_real_gdp, get_wti_crude. INTERVAL_MAX_POINTS caps data before passing to LLM.',
+        title: 'Alpha Vantage REST API',
+        subtitle: 'Remote SaaS — alphavantage.co/query',
+        detail: 'Each FunctionTool calls https://www.alphavantage.co/query with the function name + apikey as query params. Returns JSON. INTERVAL_MAX_POINTS caps time-series data (30 daily pts, 24 monthly pts) before passing to LLM context.',
         fileRef: 'backend/app/agents/economic_data.py:INTERVAL_MAX_POINTS',
       },
       {
@@ -157,7 +159,7 @@ const FLOWS: Record<string, FlowDef> = {
     observations: [
       'API key is a backend secret — Key Vault reference, never in client code or browser response.',
       'No user identity is propagated because Alpha Vantage serves only public data.',
-      'FunctionTool fallback means the agent works in local dev without the remote MCP endpoint.',
+      'FunctionTools call the REST API directly — no MCP proxy needed. Works locally as long as ALPHAVANTAGE_API_KEY is set.',
     ],
   },
 
@@ -277,7 +279,7 @@ const FLOWS: Record<string, FlowDef> = {
     pattern: '1a',
     patternLabel: 'Pattern 1a: Private MCP + Entra OBO (scope: market.read)',
     securityLevel: 'PUBLIC',
-    description: 'Same OBO architecture as Portfolio Data but with market.read scope targeting the Yahoo Finance MCP. Public market data means no row-level security is required, but the OBO token still enforces that only authorized backends can call the MCP and creates a per-user audit trail.',
+    description: 'Same OBO architecture as Portfolio Data but with market.read scope targeting the Yahoo Finance MCP. Provides real-time quotes, fundamentals, valuation multiples (P/E, EV/EBITDA), analyst ratings, price targets, and stock comparisons. Public market data means no row-level security, but the OBO token still enforces authorized backend access and creates a per-user audit trail.',
     highlightOBO: true,
     steps: [
       {
@@ -305,7 +307,7 @@ const FLOWS: Record<string, FlowDef> = {
         nodeType: 'mcp-public',
         title: 'Yahoo Finance MCP',
         subtitle: 'Internal Container App (external:false)',
-        detail: 'Not reachable from public internet. EntraTokenVerifier validates OBO token. check_scope("market.read"). audit_log() records caller_id (oid), tool name, duration_ms, outcome on every call. get_caller_id() for logging only (no RLS needed for public data).',
+        detail: 'Not reachable from public internet. EntraTokenVerifier validates OBO token. check_scope("market.read"). Tools: get_quote (real-time price), get_financials (P/E, EV/EBITDA, revenue), get_analyst_ratings (recommendations, price targets), compare_stocks (multi-symbol), get_news. audit_log() records caller_id (oid), tool name, duration_ms, outcome on every call.',
         fileRef: 'mcp-servers/yahoo-finance/entra_auth.py + server.py:audit_log',
       },
       {
@@ -632,6 +634,203 @@ const FLOWS: Record<string, FlowDef> = {
       'Row-level security still enforced — identity source changes from Entra oid to mock JWT sub claim.',
       'MultiIDPTokenVerifier is drop-in: only TRUSTED_ISSUERS env var changes, no MCP code modifications.',
       'In production: replace mock-OIDC URL with real Okta issuer in TRUSTED_ISSUERS.',
+    ],
+  },
+
+  'portfolio_agent__okta-proxy': {
+    pattern: 'okta-proxy',
+    patternLabel: 'Option C: Okta Proxy Mode — Portfolio uses Mock JWT directly (no proxy)',
+    securityLevel: 'CONFIDENTIAL',
+    description: 'In Okta Proxy mode, the Okta proxy is used only for Yahoo Finance MCP (private_data_agent). Portfolio DB MCP still receives a mock Okta JWT minted by the mock-OIDC server and sent directly — no proxy hop. X-User-Id header is included for RLS fallback. SQL row-level security is still enforced.',
+    highlightOBO: false,
+    steps: [
+      { nodeType: 'browser',     title: 'Browser (MSAL)',          subtitle: 'Entra token (user identity)',   detail: 'Entra token identifies the user. OID/email used as sub when minting the mock JWT. demo_mode=okta-proxy: Okta proxy is active for Yahoo Finance but NOT for portfolio.',                                                                                                    fileRef: 'frontend/src/authConfig.ts' },
+      { nodeType: 'backend',     title: 'FastAPI Backend',          subtitle: 'POST /token to mock-OIDC',     detail: '_fetch_mock_oidc_tokens(): fetches both "yahoo" and "portfolio" mock JWTs. portfolio token: audience=api://<portfolio-mcp-client-id>, scope=portfolio.read. PortfolioDataAgent.build_tools(): demo_mode in ("multi-idp","okta-proxy") branch — sends mock JWT + X-User-Id header directly to portfolio MCP (no Okta proxy involved).',  fileRef: 'backend/app/agents/portfolio_data.py:build_tools' },
+      { nodeType: 'external',    title: 'Mock OIDC Server',         subtitle: 'Simulates Okta IDP',           detail: 'RS256 JWT: iss=http://localhost:8889, aud=api://<portfolio-mcp-client-id>, scp=portfolio.read, sub=demo@hackathon.local. Same token as multi-idp mode.',                                                                                                            fileRef: 'mcp-servers/mock-oidc/server.py:_mint_token' },
+      { nodeType: 'mcp-private', title: 'Portfolio DB MCP',         subtitle: 'MultiIDPTokenVerifier + RLS',  detail: 'TRUSTED_ISSUERS=http://localhost:8889. check_scope("portfolio.read") validates scp. get_user_id_from_request() reads sub from _request_claims ContextVar. X-User-Id header provides RLS fallback if sub absent.',                                                    fileRef: 'mcp-servers/portfolio-db/entra_auth.py:MultiIDPTokenVerifier' },
+      { nodeType: 'data',        title: 'SQLite / Fabric',          subtitle: 'SQL Row-Level Security',       detail: 'WHERE user_id = demo@hackathon.local — same parameterized RLS as entra/multi-idp modes. Only the identity source differs (sub from mock JWT vs oid from OBO token).',                                                                                                 fileRef: 'mcp-servers/portfolio-db/server.py:_db_get_holdings' },
+    ],
+    arrows: [
+      { credential: 'entra-jwt', label: 'Bearer Entra JWT (identify user)' },
+      { credential: 'mock-oidc', label: 'POST /token — sub=user, audience, scp=portfolio.read' },
+      { credential: 'mock-oidc', label: 'RS256 JWT direct (no proxy hop for portfolio)' },
+      { credential: 'mock-oidc', label: 'JWKS validated + scope + RLS via sub' },
+    ],
+    observations: [
+      'Okta proxy is NOT used for portfolio — only private_data_agent (Yahoo Finance MCP) routes through the proxy.',
+      'Mock JWT is sent directly to portfolio MCP, same code path as multi-idp mode (build_tools branches on ("multi-idp","okta-proxy")).',
+      'X-User-Id header provides RLS fallback: if MCP cannot extract sub from token, it reads the header instead.',
+    ],
+  },
+
+  'private_data_agent__entra-agent': {
+    pattern: 'entra-agent',
+    patternLabel: 'Option D: Entra Agent Identity (DefaultAzureCredential, no client secret)',
+    securityLevel: 'PUBLIC',
+    description: 'The backend uses DefaultAzureCredential to acquire an app-only token from Entra ID via an agent identity blueprint (no stored client secret). Yahoo Finance MCP validates it via AgentIdentityTokenVerifier — checking the oid matches the expected agent service principal. No user OBO required.',
+    highlightOBO: false,
+    steps: [
+      { nodeType: 'browser',    title: 'Browser / SPA',           subtitle: 'No user token required',          detail: 'Market data is public. In entra-agent mode the backend authenticates as the agent identity, not on behalf of a user. User does not need to be signed in for this flow.',                                                                                                         fileRef: 'frontend/src/components/NavBar.tsx' },
+      { nodeType: 'backend',    title: 'FastAPI Backend',          subtitle: 'DefaultAzureCredential',          detail: 'build_agent_identity_http_client(): AgentIdentityAuth uses DefaultAzureCredential.get_token("api://<yahoo-mcp-client-id>/.default"). Credential resolved via Managed Identity (production) or Azure CLI / env vars (dev). No client_secret storage required.',                 fileRef: 'backend/app/core/auth/agent_identity.py:AgentIdentityAuth' },
+      { nodeType: 'entra',      title: 'Entra ID',                 subtitle: 'Agent blueprint token issuance', detail: 'Entra issues an app-only JWT for the agent identity (service principal oid from agent blueprint). Token: no scp claim, has roles, aud=api://<yahoo-mcp-client-id>. Issuer = sts.windows.net (v1) or login.microsoftonline.com (v2).',                                         fileRef: 'backend/app/core/auth/agent_identity.py:AgentIdentityAuth._acquire' },
+      { nodeType: 'mcp-public', title: 'Yahoo Finance MCP',        subtitle: 'AgentIdentityTokenVerifier',      detail: 'AgentIdentityTokenVerifier.verify_token(): inherits MultiIDPTokenVerifier signature check. For app-only tokens (no scp), additionally checks oid == AGENT_IDENTITY_ID env var. Dev mode: static token fallback.',                                                               fileRef: 'mcp-servers/yahoo-finance/entra_auth.py:AgentIdentityTokenVerifier' },
+      { nodeType: 'data',       title: 'yfinance / Yahoo Finance',  subtitle: 'Public market data',              detail: 'Same yfinance tools as Entra mode. No per-user audit logged via oid (agent identity, not a user). AGENT_IDENTITY_ID pins the exact service principal for service-to-service boundary enforcement.',                                                                              fileRef: 'mcp-servers/yahoo-finance/server.py' },
+    ],
+    arrows: [
+      { credential: 'none',            label: 'No user token needed' },
+      { credential: 'agent-identity',  label: 'DefaultAzureCredential -> Entra token request' },
+      { credential: 'agent-identity',  label: 'App-only JWT (aud=yahoo-mcp, oid=agent)' },
+      { credential: 'agent-identity',  label: 'JWKS validated + oid pinned to agent blueprint' },
+    ],
+    observations: [
+      'No client secret stored anywhere — DefaultAzureCredential uses Managed Identity or agent blueprint federated credential.',
+      'oid check in AgentIdentityTokenVerifier pins exactly which agent service principal is trusted (defense-in-depth).',
+      'Backward compatible: delegated user tokens (with scp) still accepted unchanged in entra/multi-idp modes.',
+    ],
+  },
+
+  'portfolio_agent__entra-agent': {
+    pattern: 'entra-agent',
+    patternLabel: 'Option D: Entra Agent Identity (DefaultAzureCredential, portfolio-db)',
+    securityLevel: 'CONFIDENTIAL',
+    description: 'Same agent identity flow as Yahoo Finance MCP, but targeting Portfolio DB MCP. The agent identity service principal has shared/demo access — no per-user SQL row-level security (no user oid available in an app-only token). Appropriate for demo/batch access patterns, not per-user isolation.',
+    highlightOBO: false,
+    steps: [
+      { nodeType: 'browser',     title: 'Browser / SPA',          subtitle: 'User token optional',              detail: 'In entra-agent mode, no OBO exchange is performed. The backend authenticates as the agent blueprint, not as the user. User sign-in may be skipped.',                                                                                                                          fileRef: 'frontend/src/components/NavBar.tsx' },
+      { nodeType: 'backend',     title: 'FastAPI Backend',         subtitle: 'DefaultAzureCredential',           detail: 'build_agent_identity_http_client(): acquires token for api://<portfolio-mcp-client-id>/.default. AgentIdentityAuth caches the token and auto-refreshes near expiry. Dev fallback: static dev-portfolio-mcp-token when ENTRA_TENANT_ID absent.',                            fileRef: 'backend/app/core/auth/agent_identity.py:build_agent_identity_http_client' },
+      { nodeType: 'entra',       title: 'Entra ID',                subtitle: 'App-only token (agent blueprint)', detail: 'Client credentials flow (via DefaultAzureCredential). App-only JWT: no scp claim, has roles if app manifest defines them. aud=api://<portfolio-mcp-client-id>. oid = agent service principal object ID.',                                                               fileRef: 'backend/app/core/auth/agent_identity.py:AgentIdentityAuth._acquire' },
+      { nodeType: 'mcp-private', title: 'Portfolio DB MCP',        subtitle: 'AgentIdentityTokenVerifier + oid', detail: 'AgentIdentityTokenVerifier: validates via MultiIDPTokenVerifier (JWKS + audience). For app-only tokens checks oid == AGENT_IDENTITY_ID. No scp in app-only token; check_scope() skipped for agent mode. RLS: shared demo access (no user oid).',                          fileRef: 'mcp-servers/portfolio-db/entra_auth.py:AgentIdentityTokenVerifier' },
+      { nodeType: 'data',        title: 'SQLite / Fabric',         subtitle: 'Shared demo access (no user RLS)', detail: 'Agent identity has no user oid in the token. Row-level security is relaxed to shared/demo access in entra-agent mode. For production per-user isolation, use entra mode (OBO).',                                                                                         fileRef: 'mcp-servers/portfolio-db/server.py:_db_get_holdings' },
+    ],
+    arrows: [
+      { credential: 'none',           label: 'No user OBO exchange' },
+      { credential: 'agent-identity', label: 'DefaultAzureCredential -> Entra token' },
+      { credential: 'agent-identity', label: 'App-only JWT (aud=portfolio-mcp, oid=agent)' },
+      { credential: 'agent-identity', label: 'JWKS validated + oid pinned to agent blueprint' },
+    ],
+    observations: [
+      'No stored secret — DefaultAzureCredential resolves via Managed Identity (Container App identity) in production.',
+      'Trade-off: app-only token loses per-user RLS. Use entra mode (OBO) when user data isolation is required.',
+      'AGENT_IDENTITY_ID pin prevents any other Entra service principal from calling the MCP as an agent.',
+    ],
+  },
+
+  // ── Entra Agent Identity: agents unaffected by mode ──────────────────────
+  // market_intel_agent and economic_agent do not call MCP servers — they use
+  // Foundry Managed Identity and a backend API key respectively. The entra-agent
+  // demo mode only changes how the backend authenticates to MCP servers, so
+  // these agents behave identically in all four modes. Explicit variants are
+  // provided so the security trace is accurate rather than silent.
+
+  'market_intel_agent__entra-agent': {
+    pattern: 'foundry',
+    patternLabel: 'Foundry Prompt Agent + Managed Identity + Bing Grounding',
+    securityLevel: 'PUBLIC',
+    description: 'Agent Identity mode is active, but this agent is unaffected. Market Intel calls Azure AI Foundry directly via Managed Identity — it does not route through any MCP server. The entra-agent demo mode only applies to MCP server calls (portfolio-db, yahoo-finance). This flow is identical in all four auth modes.',
+    highlightOBO: false,
+    steps: [
+      {
+        nodeType: 'browser',
+        title: 'Browser / SPA',
+        subtitle: 'Optional Entra token',
+        detail: 'Market news is public. MSAL token is optional. If signed in, token is validated by backend but not forwarded to Bing. Agent Identity mode does not change anything for this agent.',
+        fileRef: 'frontend/src/authConfig.ts',
+      },
+      {
+        nodeType: 'backend',
+        title: 'FastAPI Backend',
+        subtitle: 'RS256 JWKS validation',
+        detail: 'EntraJWTValidator validates token if present. AuthContext extracted. Triage routes to market_intel_agent. Agent Identity mode: DefaultAzureCredential is configured for MCP calls, but market_intel_agent makes no MCP calls — it uses RawFoundryAgentChatClient directly.',
+        fileRef: 'backend/app/core/auth/middleware.py:EntraJWTValidator',
+      },
+      {
+        nodeType: 'foundry',
+        title: 'MarketIntelAgent',
+        subtitle: 'RawFoundryAgentChatClient',
+        detail: 'Uses RawFoundryAgentChatClient with Bing Grounding (server-side Foundry tool). No MCP server is involved — the Agent Identity credential (DefaultAzureCredential) is not used by this agent at all.',
+        fileRef: 'backend/app/agents/market_intel.py:MarketIntelAgent.create',
+      },
+      {
+        nodeType: 'foundry',
+        title: 'Azure AI Foundry',
+        subtitle: 'Agents Service — Managed Identity',
+        detail: 'DefaultAzureCredential -> Managed Identity authenticates to Foundry. This is the same in all demo modes. The agent identity blueprint (finagents SP) is used only for MCP server authentication, not for Foundry calls.',
+        fileRef: 'infra/modules/foundry.bicep + infra/modules/managed-identity.bicep',
+      },
+      {
+        nodeType: 'external',
+        title: 'Bing Search',
+        subtitle: 'Real-time web grounding',
+        detail: 'Foundry-managed connection to Bing Search. Returns cited sources. Identical behaviour across all four demo modes — demo mode only affects MCP server auth.',
+        fileRef: 'backend/app/agents/market_intel.py:MARKET_INTEL_INSTRUCTIONS',
+      },
+    ],
+    arrows: [
+      { credential: 'entra-jwt',        label: 'Bearer Entra JWT (optional)' },
+      { credential: 'entra-jwt',        label: 'Validated AuthContext' },
+      { credential: 'managed-identity', label: 'DefaultAzureCredential (MI) — same in all modes' },
+      { credential: 'managed-identity', label: 'Foundry-managed MI connection' },
+    ],
+    observations: [
+      'Agent Identity mode does NOT affect this agent — market_intel_agent never calls an MCP server.',
+      'Foundry authentication always uses Managed Identity regardless of demo mode.',
+      'To trace Agent Identity token acquisitions: Entra admin > Sign-in logs > Service principal sign-ins > filter by appId fb3c0e70 (finagents).',
+    ],
+  },
+
+  'economic_agent__entra-agent': {
+    pattern: '1b',
+    patternLabel: 'Pattern 1b: External Public MCP + Backend API Key',
+    securityLevel: 'PUBLIC',
+    description: 'Agent Identity mode is active, but this agent is unaffected. Economic Data calls the Alpha Vantage remote MCP using a backend-held API key — it does not use Entra, OBO, or MCP server auth at all. The entra-agent demo mode only applies to portfolio-db and yahoo-finance MCP servers.',
+    highlightOBO: false,
+    steps: [
+      {
+        nodeType: 'browser',
+        title: 'Browser / SPA',
+        subtitle: 'No auth required',
+        detail: 'Economic data is public. No Entra token needed. Agent Identity mode has no effect on this agent — there is no Entra token exchange in this flow at all.',
+        fileRef: 'frontend/src/authConfig.ts',
+      },
+      {
+        nodeType: 'backend',
+        title: 'FastAPI Backend',
+        subtitle: 'Guardrail + triage routing',
+        detail: 'check_user_message() runs content policy. Triage routes to economic_agent. The Agent Identity credential (DefaultAzureCredential / finagents SP) is not involved in this flow.',
+        fileRef: 'backend/app/core/auth/middleware.py',
+      },
+      {
+        nodeType: 'external',
+        title: 'EconomicDataAgent',
+        subtitle: 'Builds FunctionTools (direct REST)',
+        detail: 'API key loaded from ALPHAVANTAGE_API_KEY env var (Key Vault reference). Same in all demo modes — entra-agent mode does not change this agent\'s auth.',
+        fileRef: 'backend/app/agents/economic_data.py:_build_av_tools',
+      },
+      {
+        nodeType: 'external',
+        title: 'Alpha Vantage REST API',
+        subtitle: 'Remote SaaS — alphavantage.co/query',
+        detail: 'Each FunctionTool calls https://www.alphavantage.co/query with apikey as query param. No Entra token exchange. This REST call is identical across all four demo modes.',
+        fileRef: 'backend/app/agents/economic_data.py:INTERVAL_MAX_POINTS',
+      },
+      {
+        nodeType: 'data',
+        title: 'Economic Data',
+        subtitle: 'Fed, GDP, CPI, FX, Commodities',
+        detail: 'Returns time-series JSON. Data classification: PUBLIC. Entra Agent Identity mode is active in the session but has zero effect on this data path.',
+        fileRef: 'backend/app/agents/economic_data.py:_fetch',
+      },
+    ],
+    arrows: [
+      { credential: 'none',    label: 'No token (public data)' },
+      { credential: 'none',    label: 'Dev identity only' },
+      { credential: 'api-key', label: 'API key from Key Vault env — same in all modes' },
+      { credential: 'api-key', label: '?apikey=<secret> in URL' },
+    ],
+    observations: [
+      'Agent Identity mode does NOT affect this agent — economic_agent uses an API key, not Entra auth.',
+      'The entra-agent demo mode only changes auth to portfolio-db and yahoo-finance MCP servers.',
+      'To trace Agent Identity activity: Entra admin > Sign-in logs > Service principal sign-ins > filter by appId fb3c0e70 (finagents).',
     ],
   },
 }
@@ -994,9 +1193,14 @@ export function AuthFlowPanel({ agent, open, onClose, demoMode }: AuthFlowPanelP
           <span className={`w-1.5 h-1.5 rounded-full ${secStyle.dot} inline-block`} />
           {flow.securityLevel}
         </span>
-        {demoMode && demoMode !== 'entra' && (
-          <span className={`${demoMode === 'okta-proxy' ? 'bg-rose-950 text-rose-300 ring-rose-700/50' : 'bg-orange-950 text-orange-300 ring-orange-700/50'} ring-1 rounded-full px-2 py-0.5 text-[9px] font-semibold`}>
-            {demoMode === 'multi-idp' ? 'Multi-IDP demo' : 'Okta Proxy demo'}
+        {demoMode && (
+          <span className={`${
+            demoMode === 'entra'        ? 'bg-sky-950 text-sky-300 ring-sky-700/50' :
+            demoMode === 'entra-agent' ? 'bg-violet-950 text-violet-300 ring-violet-700/50' :
+            demoMode === 'okta-proxy'  ? 'bg-rose-950 text-rose-300 ring-rose-700/50' :
+                                         'bg-orange-950 text-orange-300 ring-orange-700/50'
+          } ring-1 rounded-full px-2 py-0.5 text-[9px] font-semibold`}>
+            {demoMode === 'entra' ? 'Entra demo' : demoMode === 'entra-agent' ? 'Agent ID demo' : demoMode === 'okta-proxy' ? 'Okta Proxy demo' : 'Multi-IDP demo'}
           </span>
         )}
         <button

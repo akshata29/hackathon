@@ -40,7 +40,13 @@ class PortfolioDataAgent(BaseAgent):
     """Portfolio holdings, P&L, performance, and risk agent backed by Portfolio MCP."""
 
     name = "portfolio_agent"
-    description = "Portfolio holdings, positions, P&L, performance, risk metrics"
+    description = "Portfolio holdings, positions, P&L, performance, risk metrics, exposures"
+    example_queries: list = [
+        "Show my current holdings and sector breakdown",
+        "What is my portfolio P&L this quarter?",
+        "What are my top 5 positions by weight?",
+        "Show my risk metrics and concentration exposures",
+    ]
     system_message = PORTFOLIO_DATA_INSTRUCTIONS
 
     @classmethod
@@ -64,6 +70,15 @@ class PortfolioDataAgent(BaseAgent):
           The MCP server validates this token via JWKS; the oid claim is used
           for row-level security — no X-User-Id header needed or trusted.
 
+        Security (entra-agent mode — agent_blueprint_client_id set):
+          Uses AgentIdentityAuth: the backend's Managed Identity authenticates
+          via the agent identity blueprint (federated credential, no secret).
+          Token audience = api://<portfolio_mcp_client_id>/portfolio.read.
+          No client secret stored anywhere.  The agent identity's oid (not a
+          human user's oid) is the caller; portfolio MCP uses a shared demo
+          view in this mode (no per-user RLS since there is no user token).
+          Reference: https://learn.microsoft.com/en-us/azure/foundry/agents/concepts/agent-identity
+
         Security (dev mode):
           Falls back to X-User-Id header + static MCP_AUTH_TOKEN bearer.
           Both are required so the portfolio MCP can do RLS locally.
@@ -81,6 +96,7 @@ class PortfolioDataAgent(BaseAgent):
         import httpx
         from agent_framework import MCPStreamableHTTPTool
         from app.core.auth.obo import build_obo_http_client
+        from app.core.auth.agent_identity import build_agent_identity_http_client
 
         mcp_client_id = getattr(settings, "portfolio_mcp_client_id", "") if settings else ""
 
@@ -93,6 +109,16 @@ class PortfolioDataAgent(BaseAgent):
                 "Authorization": f"Bearer {mock_oidc_token}",
                 "X-User-Id": user_token or "demo-user",
             })
+        elif demo_mode == "entra-agent":
+            # Agent identity mode: authenticate as the agent itself (no user OBO).
+            # The downstream MCP validates the token and grants access based on
+            # the agent identity's RBAC role assignments.
+            audience = f"api://{mcp_client_id}" if mcp_client_id else ""
+            http_client = build_agent_identity_http_client(
+                settings=settings,
+                audience=audience,
+                fallback_bearer=mcp_auth_token or "dev-portfolio-mcp-token",
+            )
         else:
             # Production / dev: OBO or static bearer
             # In dev mode, include X-User-Id so the MCP server can still do RLS

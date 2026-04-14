@@ -48,7 +48,14 @@ class PrivateDataAgent(BaseAgent):
     """Real-time market data and company fundamentals agent backed by Yahoo Finance MCP."""
 
     name = "private_data_agent"
-    description = "Real-time quotes, company financials, valuation multiples, technical data"
+    description = "Real-time quotes, company financials, valuation multiples (P/E, EV/EBITDA, P/S), analyst ratings, analyst price targets, recommendation breakdowns, stock comparison"
+    example_queries: list = [
+        "What is AAPL's current P/E ratio and EV/EBITDA vs sector median?",
+        "Show MSFT analyst price targets and recommendation breakdown",
+        "Get NVDA's latest revenue and earnings figures",
+        "Compare P/E ratios for AAPL, MSFT, GOOGL",
+        "What are the analyst ratings and consensus for TSLA?",
+    ]
     system_message = PRIVATE_DATA_INSTRUCTIONS
 
     @classmethod
@@ -69,6 +76,13 @@ class PrivateDataAgent(BaseAgent):
         scoped to api://<yahoo_mcp_client_id>/market.read.  The Yahoo Finance MCP
         validates via JWKS and checks the scope before serving any tool call.
 
+        Security (entra-agent mode — agent_blueprint_client_id set):
+          Uses AgentIdentityAuth: the backend's Managed Identity authenticates
+          via the agent identity blueprint (federated credential, no secret).
+          Token audience = api://<yahoo_mcp_client_id>/market.read.
+          Yahoo Finance MCP validates via AgentIdentityTokenVerifier.
+          Reference: https://learn.microsoft.com/en-us/azure/foundry/agents/concepts/agent-identity
+
         Security (dev mode): plain bearer with static MCP_AUTH_TOKEN.
 
         Security (demo modes):
@@ -84,6 +98,7 @@ class PrivateDataAgent(BaseAgent):
         import httpx
         from agent_framework import MCPStreamableHTTPTool
         from app.core.auth.obo import build_obo_http_client
+        from app.core.auth.agent_identity import build_agent_identity_http_client
 
         # Determine effective MCP URL — proxy intercepts in okta-proxy mode
         if demo_mode == "okta-proxy" and settings:
@@ -95,6 +110,15 @@ class PrivateDataAgent(BaseAgent):
         if demo_mode in ("multi-idp", "okta-proxy") and mock_oidc_token:
             http_client = httpx.AsyncClient(
                 headers={"Authorization": f"Bearer {mock_oidc_token}"}
+            )
+        elif demo_mode == "entra-agent":
+            # Agent identity mode: no user OBO needed — agent acts under its own authority.
+            mcp_client_id = getattr(settings, "yahoo_mcp_client_id", "") if settings else ""
+            audience = f"api://{mcp_client_id}" if mcp_client_id else ""
+            http_client = build_agent_identity_http_client(
+                settings=settings,
+                audience=audience,
+                fallback_bearer=mcp_auth_token or "",
             )
         else:
             mcp_client_id = getattr(settings, "yahoo_mcp_client_id", "") if settings else ""

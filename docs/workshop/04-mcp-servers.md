@@ -34,7 +34,8 @@ async with Agent(
 | Pattern | When to use | Reference file |
 |---------|-------------|----------------|
 | **RawFoundryAgentChatClient** | Agent backed by a Foundry Prompt Agent (Bing Grounding, Knowledge Base, etc.) | `backend/app/agents/market_intel.py` |
-| **MCPStreamableHTTPTool** | Agent needs a private MCP data server with row-level security | `backend/app/agents/portfolio_data.py` |
+| **MCPStreamableHTTPTool + OBO** | Agent needs a private MCP data server with per-user row-level security | `backend/app/agents/portfolio_data.py` |
+| **MCPStreamableHTTPTool + AgentIdentityAuth** | Agent calls MCP using its own Entra identity (no user OBO, no stored secret) — entra-agent demo mode | `backend/app/agents/private_data.py` `build_tools()` entra-agent branch |
 | **FunctionTool** | Agent wraps a Python function calling a REST API or SDK | `backend/app/agents/economic_data.py` |
 
 ### HandoffBuilder orchestration
@@ -207,6 +208,58 @@ For each test, verify in the response events that `type: "handoff"` shows the co
 
 ---
 
+## Step 4c — Enable Entra Agent Identity Mode (Optional, entra-agent demo mode)
+
+> Run this step if you want to show the agent authenticating as itself using
+> Entra Agent ID — no user OBO exchange, no stored client secret.
+>
+> Full coding prompt: [template/docs/coding-prompts/README.md → Step 4c](../../template/docs/coding-prompts/README.md)
+
+**What it demonstrates:**
+
+```
+Backend (DefaultAzureCredential)
+    -- no user token needed --
+  get_token("api://<mcp-client-id>/.default")
+    v
+Entra ID  ->  app-only JWT  (oid = agent SP, no scp claim)
+    v
+MCP Server (AgentIdentityTokenVerifier)
+    validates JWKS + audience + oid guard
+    v
+Data  (shared access; no per-user RLS)
+```
+
+**Local dev reality:**  `DefaultAzureCredential` locally resolves to your `az login` user
+(a user token, not app-only).  To get a true app-only token locally, configure
+`EnvironmentCredential` via `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` / `AZURE_TENANT_ID`
+pointing to a stand-in service principal.  On Azure Container Apps the Managed Identity +
+Foundry blueprint federated credential chain runs automatically — no secret needed. See
+[auth-and-mcp-patterns.md → Local Dev vs. Real Entra Agent ID](../architecture/auth-and-mcp-patterns.md).
+
+**Key files to update:**
+
+| File | Change |
+|------|--------|
+| `mcp-servers/<my-server>/entra_auth.py` | Swap to `AgentIdentityTokenVerifier()` in server.py |
+| `mcp-servers/<my-server>/.env` | Add `AGENT_IDENTITY_ID=<agent-sp-oid>` |
+| `backend/app/agents/<my_agent>.py` | Add `entra-agent` branch in `build_tools()` using `build_agent_identity_http_client()` |
+| `backend/app/config.py` | Add `agent_blueprint_client_id: str = ""` |
+| `backend/.env` | Add `AGENT_BLUEPRINT_CLIENT_ID=` |
+
+**Test:**
+
+```powershell
+# Send a chat message with demo_mode=entra-agent; watch the backend logs
+$body = @{ message = "<your test query>"; session_id = "test-agent-id-01"; demo_mode = "entra-agent" } | ConvertTo-Json
+Invoke-RestMethod -Method POST -Uri "http://localhost:8000/api/chat/message" `
+  -ContentType "application/json" -Body $body
+# Backend logs should show: AgentIdentityAuth acquired token for audience api://<mcp-client-id>
+# MCP server logs should show: Token verified, oid=<agent-sp-oid>
+```
+
+---
+
 ## Step 5 — Test the Comprehensive Mode (Optional)
 
 If you implemented ConcurrentBuilder:
@@ -241,6 +294,22 @@ Add the missing setting with a default value.
 
 **Agent raises AuthenticationError**: `DefaultAzureCredential()` is failing. Ensure your `.env`
 has `AZURE_CLIENT_ID` set (or run in a Container App with Managed Identity).
+
+**entra-agent mode: MCP returns 403, logs show "oid mismatch"**: `AGENT_IDENTITY_ID` in the
+MCP `.env` does not match the OID of the SP that `DefaultAzureCredential` resolved to.
+Run `az ad signed-in-user show --query id` (user) or `az ad sp show --id <appId> --query id`
+(SP) to find the actual OID, then update `AGENT_IDENTITY_ID` in the MCP `.env`.
+
+**entra-agent mode: token has `scp` claim (user token, not app-only)**: `DefaultAzureCredential`
+resolved to your `az login` user account instead of a service principal.  Either set
+`AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` / `AZURE_TENANT_ID` in `backend/.env` pointing to a
+stand-in SP, or leave `AGENT_IDENTITY_ID` empty during dev to skip the oid guard.
+
+**entra-agent mode: sign-in logs empty in Entra > Agent ID > Sign-in logs**: Expected when
+testing locally with a stand-in SP — the `isAgent:true` flag is absent on manually-created
+SPs.  Check Entra > Sign-in logs > Service principal sign-ins filtered by your SP name.
+Agent ID sign-in logs only populate when running on Azure Container Apps with the Foundry
+blueprint Managed Identity chain.
 
 ---
 

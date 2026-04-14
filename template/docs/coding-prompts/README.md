@@ -349,6 +349,96 @@ Reference: mcp-servers/portfolio-db/entra_auth.py -- MultiIDPTokenVerifier class
 
 ---
 
+## Step 4c — Enable Entra Agent Identity Mode (Option D)
+
+> **Goal**: Allow the backend to call your MCP server using its **own identity** —
+> no user OBO, no stored client secret.  The backend authenticates as the agent
+> service principal via `DefaultAzureCredential` (Managed Identity in production,
+> `az login` / stand-in SP locally).
+>
+> **When to use**: agent batch workflows, single-tenant demos, any scenario where
+> the backend acts autonomously without a user context.
+> **When NOT to use**: multi-user apps that require per-user SQL row-level security—
+> use OBO (Step 4) instead since agent tokens carry no user `oid`.
+>
+> Reference implementation:
+> - `backend/app/core/auth/agent_identity.py` — `AgentIdentityAuth` / `build_agent_identity_http_client()`
+> - `backend/app/agents/private_data.py` — `build_tools()` `entra-agent` branch
+> - `mcp-servers/yahoo-finance/entra_auth.py` — `AgentIdentityTokenVerifier`
+
+```
+I have an existing private MCP server at mcp-servers/<my-server-name>/server.py
+that currently uses OBO auth (EntraTokenVerifier or MultiIDPTokenVerifier).
+
+I want to add an "entra-agent" demo mode so the backend can call the MCP server
+using the agent's own Entra identity (no user token required).
+
+Token flow:
+  Backend
+    DefaultAzureCredential.get_token("api://<mcp-client-id>/.default")
+      -> app-only JWT (aud=api://<mcp-client-id>, oid=agent SP, no scp claim)
+  MCP Server
+    AgentIdentityTokenVerifier validates JWT (JWKS + audience + oid guard)
+
+Steps:
+
+1. MCP server changes (mcp-servers/<my-server-name>/entra_auth.py):
+   a) Add AGENT_IDENTITY_ID env var (already in the template entra_auth.py).
+   b) Verify AgentIdentityTokenVerifier class is present (already in template).
+   c) Verify check_scope() has the agent-identity bypass (already in template).
+   d) In server.py, swap to:
+        auth_provider = AgentIdentityTokenVerifier()
+      (This is backward-compatible -- OBO and multi-IDP tokens still work.)
+
+2. Backend agent changes (backend/app/agents/<my_agent>.py) in build_tools():
+   a) Accept demo_mode in kwargs.
+   b) When demo_mode == "entra-agent":
+        from app.core.auth.agent_identity import build_agent_identity_http_client
+        mcp_client_id = getattr(settings, "my_mcp_client_id", "")
+        audience = f"api://{mcp_client_id}"
+        http_client = build_agent_identity_http_client(
+            settings=settings,
+            audience=audience,
+            fallback_bearer=mcp_auth_token or "",
+        )
+      Otherwise: use existing build_obo_http_client() path.
+   Reference: backend/app/agents/private_data.py  build_tools() entra-agent branch
+
+3. Add AGENT_BLUEPRINT_CLIENT_ID to backend config + .env.example:
+   In backend/app/config.py DOMAIN-SPECIFIC section:
+     agent_blueprint_client_id: str = ""
+   In backend/.env.example:
+     # Entra Agent ID Blueprint client ID (entra-agent mode only).
+     # From Foundry project > Agent Identity > Blueprint app registration.
+     # Local dev: use your stand-in SP app ID (or leave empty for fallback).
+     AGENT_BLUEPRINT_CLIENT_ID=
+
+4. MCP server .env.example: add AGENT_IDENTITY_ID (see note above).
+
+5. chat.py: add "entra-agent" to _VALID_DEMO_MODES if not already present.
+   Reference: backend/app/routes/chat.py
+
+6. Frontend (optional -- for the Auth Flow Panel security trace):
+   Add an "entra-agent" pattern entry with the correct flow steps.
+   Reference: frontend/src/components/AuthFlowPanel.tsx  PatternKey / FLOWS
+
+LOCAL DEV NOTE:
+  DefaultAzureCredential locally resolves to your az login user (a USER token,
+  not an app-only token).  AgentIdentityTokenVerifier will only enforce the oid
+  guard if AGENT_IDENTITY_ID is set in the MCP .env.  For a clean local test:
+    a) Create a stand-in SP: az ad app create --display-name "my-agent-sp"
+                             az ad sp create --id <app-id>
+    b) Set in backend/.env:  AZURE_CLIENT_ID=<app-id>
+                             AZURE_CLIENT_SECRET=<secret>
+                             AZURE_TENANT_ID=<tenant-id>
+    c) Set in MCP .env:      AGENT_IDENTITY_ID=<sp-object-id>
+  On Azure Container Apps, skip steps a-c -- the Managed Identity + Foundry
+  blueprint federated credential chain handles everything automatically with
+  no stored secret.
+```
+
+---
+
 ## Step 5 — Add a Remote/Public MCP or REST API Tool
 
 > **Goal**: Give an agent access to a public data source via MCP or direct API calls.

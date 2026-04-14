@@ -103,6 +103,9 @@ class BaseAgent(ABC):
     name: ClassVar[str] = ""
     description: ClassVar[str] = ""
     system_message: ClassVar[str] = ""
+    # Representative queries this agent handles — used to auto-generate
+    # triage routing instructions from the registry at runtime.
+    example_queries: ClassVar[list] = []
 
     # Populated automatically via __init_subclass__ — do not mutate directly.
     _registry: ClassVar[dict[str, "type[BaseAgent]"]] = {}

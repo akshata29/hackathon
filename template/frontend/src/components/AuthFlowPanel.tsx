@@ -43,6 +43,7 @@ export function AuthFlowPanel({ agentName, demoMode = 'entra' }: AuthFlowPanelPr
       {demoMode === 'entra' && 'Entra OBO (production)'}
       {demoMode === 'multi-idp' && 'Multi-IDP (Option B)'}
       {demoMode === 'okta-proxy' && 'Identity Proxy (Option C)'}
+      {demoMode === 'entra-agent' && 'Entra Agent Identity (Option D — no OBO, no secret)'}
       {agentName && <span className="ml-2 text-gray-600">agent: {agentName}</span>}
     </div>
   )

@@ -24,7 +24,9 @@
 import json
 import logging
 import os
+import time
 
+import httpx
 import uvicorn
 import yfinance as yf
 from dotenv import load_dotenv
@@ -55,6 +57,142 @@ from a2a.utils import get_message_text, new_agent_text_message
 load_dotenv()
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Agent identity auth (Entra Agent ID mode — ESG_REQUIRE_AGENT_AUTH=true)
+# ---------------------------------------------------------------------------
+# When ESG_REQUIRE_AGENT_AUTH is "true" the server validates every incoming
+# Bearer token as an Entra JWT issued to the backend's agent identity
+# (DefaultAzureCredential / agent blueprint credential — no client secret).
+# Set AGENT_IDENTITY_ID to the oid of the expected service principal to pin
+# exactly which agent is trusted; leave empty to trust any valid Entra app token.
+# ---------------------------------------------------------------------------
+ESG_REQUIRE_AGENT_AUTH: bool = os.getenv("ESG_REQUIRE_AGENT_AUTH", "").lower() == "true"
+ENTRA_TENANT_ID: str = os.getenv("ENTRA_TENANT_ID", "")
+ESG_CLIENT_ID: str = os.getenv("ESG_CLIENT_ID", "")   # app registration client id for this server
+AGENT_IDENTITY_ID: str = os.getenv("AGENT_IDENTITY_ID", "")
+_ESG_DEV_TOKEN: str = os.getenv("ESG_DEV_TOKEN", "dev-esg-token")
+
+# Module-level JWKS cache shared across requests (TTL = 1 hour)
+_esg_jwks_uri: str | None = None
+_esg_jwks_cache: dict | None = None
+_esg_jwks_fetched: float = 0.0
+_JWKS_TTL: float = 3600.0
+
+
+async def _verify_esg_bearer(token: str) -> dict | None:
+    """Verify an Entra Bearer token for the ESG A2A server.
+
+    Returns the decoded JWT claims on success, None on failure.
+    App-only tokens (no ``scp`` claim) are additionally checked against
+    AGENT_IDENTITY_ID when that env var is set.
+    """
+    global _esg_jwks_uri, _esg_jwks_cache, _esg_jwks_fetched
+
+    if not ENTRA_TENANT_ID:
+        # Dev mode: accept static token
+        return {"sub": "dev", "dev_mode": True} if token == _ESG_DEV_TOKEN else None
+
+    try:
+        from jose import JWTError, jwt as jose_jwt  # noqa: PLC0415
+
+        header = jose_jwt.get_unverified_header(token)
+        kid = header.get("kid")
+        unverified = jose_jwt.get_unverified_claims(token)
+        iss: str = unverified.get("iss", "")
+
+        entra_v2 = f"https://login.microsoftonline.com/{ENTRA_TENANT_ID}/v2.0"
+        entra_v1 = f"https://sts.windows.net/{ENTRA_TENANT_ID}/"
+        if iss not in (entra_v2, entra_v1):
+            logger.warning("ESG auth: rejected token issuer=%r", iss)
+            return None
+
+        # Refresh JWKS cache when stale or empty
+        if not _esg_jwks_cache or (time.monotonic() - _esg_jwks_fetched) > _JWKS_TTL:
+            async with httpx.AsyncClient(timeout=10) as client:
+                if not _esg_jwks_uri:
+                    oidc_resp = await client.get(
+                        f"https://login.microsoftonline.com/{ENTRA_TENANT_ID}/v2.0"
+                        "/.well-known/openid-configuration"
+                    )
+                    oidc_resp.raise_for_status()
+                    _esg_jwks_uri = oidc_resp.json()["jwks_uri"]
+                jwks_resp = await client.get(_esg_jwks_uri)
+                jwks_resp.raise_for_status()
+                _esg_jwks_cache = jwks_resp.json()
+                _esg_jwks_fetched = time.monotonic()
+
+        rsa_key: dict = {}
+        for key in (_esg_jwks_cache or {}).get("keys", []):
+            if key.get("kid") == kid:
+                rsa_key = {k: key[k] for k in ("kty", "kid", "use", "n", "e") if k in key}
+                break
+
+        if not rsa_key:
+            _esg_jwks_cache = None   # force refresh on next request
+            logger.warning("ESG auth: JWKS kid=%r not found; cache cleared", kid)
+            return None
+
+        audience = f"api://{ESG_CLIENT_ID}" if ESG_CLIENT_ID else None
+        decode_kwargs: dict = {"algorithms": ["RS256"], "issuer": iss}
+        if audience:
+            decode_kwargs["audience"] = audience
+
+        claims: dict = jose_jwt.decode(token, rsa_key, **decode_kwargs)
+
+        # For app-only tokens (no scp), optionally enforce agent identity oid
+        if AGENT_IDENTITY_ID and not claims.get("scp"):
+            oid = claims.get("oid", "")
+            if oid != AGENT_IDENTITY_ID:
+                logger.warning(
+                    "ESG auth: rejected app-only token oid=%r (expected %r)",
+                    oid, AGENT_IDENTITY_ID,
+                )
+                return None
+
+        return claims
+
+    except Exception as exc:
+        logger.warning("ESG bearer verification failed: %s", exc)
+        return None
+
+
+class _AgentAuthMiddleware:
+    """Pure-ASGI middleware that enforces Entra Bearer auth on the ESG A2A server."""
+
+    def __init__(self, app) -> None:
+        self._app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await self._app(scope, receive, send)
+            return
+
+        # Allow agent card discovery endpoint through without auth
+        path: str = scope.get("path", "")
+        if path.startswith("/.well-known"):
+            await self._app(scope, receive, send)
+            return
+
+        headers: dict[bytes, bytes] = dict(scope.get("headers", []))
+        raw_auth: str = headers.get(b"authorization", b"").decode()
+
+        if not raw_auth.startswith("Bearer "):
+            from starlette.responses import Response  # noqa: PLC0415
+            await Response(
+                "Unauthorized",
+                status_code=401,
+                headers={"WWW-Authenticate": "Bearer"},
+            )(scope, receive, send)
+            return
+
+        claims = await _verify_esg_bearer(raw_auth[7:])
+        if claims is None:
+            from starlette.responses import Response  # noqa: PLC0415
+            await Response("Forbidden", status_code=403)(scope, receive, send)
+            return
+
+        await self._app(scope, receive, send)
 
 # ---------------------------------------------------------------------------
 # ESG Tools backed by Yahoo Finance governance risk data
@@ -429,7 +567,11 @@ def build_app():
         agent_executor=ESGAdvisorExecutor(),
         task_store=InMemoryTaskStore(),
     )
-    return A2AStarletteApplication(agent_card=agent_card, http_handler=handler).build()
+    a2a_app = A2AStarletteApplication(agent_card=agent_card, http_handler=handler).build()
+    if ESG_REQUIRE_AGENT_AUTH:
+        logger.info("ESG A2A server: agent identity auth ENABLED (AGENT_IDENTITY_ID=%r)", AGENT_IDENTITY_ID or "<any>")
+        return _AgentAuthMiddleware(a2a_app)
+    return a2a_app
 
 
 app = build_app()

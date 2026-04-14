@@ -41,7 +41,13 @@ class MarketIntelAgent(BaseAgent):
     """Market intelligence agent backed by a Foundry Prompt Agent with Bing Grounding."""
 
     name = "market_intel_agent"
-    description = "Market news, analyst ratings, earnings, sector trends (Bing-grounded)"
+    description = "Market news, analyst commentary and narratives, earnings coverage, sector trends — real-time Bing-grounded search (not structured data)"
+    example_queries: list = [
+        "What are the latest analyst upgrades or downgrades for NVDA?",
+        "What are analysts saying about the semiconductor sector outlook?",
+        "What happened in the market today?",
+        "What is the latest news on Apple earnings?",
+    ]
     system_message = MARKET_INTEL_INSTRUCTIONS
 
     @classmethod

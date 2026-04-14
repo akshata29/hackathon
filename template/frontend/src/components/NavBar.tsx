@@ -113,9 +113,10 @@ export function NavBar({ activeTab, onTabChange, demoMode, onDemoModeChange }: N
             </span>
             <div className="flex gap-0.5 bg-gray-800/60 rounded-lg p-0.5">
               {([
-                { value: 'entra',      label: 'Entra',      title: 'Default: Entra OBO token exchange (production flow)' },
-                { value: 'multi-idp',  label: 'Multi-IDP',  title: 'Option B: Backend presents a non-Entra JWT directly to MCP (MultiIDPTokenVerifier)' },
-                { value: 'okta-proxy', label: 'Proxy',      title: 'Option C: Calls routed through an identity proxy (token swap)' },
+                { value: 'entra',        label: 'Entra',      title: 'Default: Entra OBO token exchange (production flow)' },
+                { value: 'multi-idp',    label: 'Multi-IDP',  title: 'Option B: Backend presents a non-Entra JWT directly to MCP (MultiIDPTokenVerifier)' },
+                { value: 'okta-proxy',   label: 'Proxy',      title: 'Option C: Calls routed through an identity proxy (token swap)' },
+                { value: 'entra-agent',  label: 'Agent ID',   title: 'Option D: Backend uses Entra Agent Identity -- no client secret, no user OBO (DefaultAzureCredential)' },
               ] as { value: DemoMode; label: string; title: string }[]).map(({ value, label, title }) => (
                 <button
                   key={value}
@@ -125,6 +126,8 @@ export function NavBar({ activeTab, onTabChange, demoMode, onDemoModeChange }: N
                     demoMode === value
                       ? value === 'entra'
                         ? 'bg-sky-700/70 text-sky-200 shadow shadow-sky-900/40'
+                        : value === 'entra-agent'
+                        ? 'bg-violet-700/70 text-violet-200 shadow shadow-violet-900/40'
                         : 'bg-amber-700/70 text-amber-200 shadow shadow-amber-900/40'
                       : 'text-gray-500 hover:bg-gray-700/60 hover:text-gray-300'
                   }`}

@@ -83,6 +83,12 @@ class ESGAdvisorAgent(BaseAgent):
 
     name = "esg_advisor_agent"
     description = ESG_ADVISOR_DESCRIPTION
+    example_queries: list = [
+        "What is AAPL's ESG and governance risk score?",
+        "Show sustainability ratings for MSFT and GOOGL",
+        "What is the environmental risk score for oil companies in my portfolio?",
+        "Compare ESG scores for AAPL, MSFT, TSLA",
+    ]
     system_message = _ESG_INSTRUCTIONS
 
     @classmethod

@@ -23,6 +23,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from entra_auth import (
+    AgentIdentityTokenVerifier,
     EntraTokenVerifier,
     MultiIDPTokenVerifier,
     audit_log,
@@ -44,7 +45,7 @@ logger = logging.getLogger(__name__)
 # Production (ENTRA_TENANT_ID set): validates OBO JWT (audience=api://<MCP_CLIENT_ID>).
 # Dev mode: falls back to static MCP_AUTH_TOKEN comparison.
 # ---------------------------------------------------------------------------
-auth_provider = MultiIDPTokenVerifier()
+auth_provider = AgentIdentityTokenVerifier()
 
 mcp = FastMCP(
     name="yahoo-finance-mcp",

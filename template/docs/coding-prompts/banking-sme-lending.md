@@ -387,6 +387,50 @@ Part A: Core Banking MCP Server
 
 ---
 
+## Step 6c — Enable Entra Agent Identity Mode (Optional, entra-agent demo)
+
+> Skip if you only need the default OBO flow.  Use when you want to show the backend
+> calling the core-banking MCP under its **own Entra identity** — no user OBO, no stored secret.
+>
+> Full prompt template: [template/docs/coding-prompts/README.md -> Step 4c](./README.md)
+
+**SME Lending Advisor note**: agent-identity mode suits **relationship-manager batch
+workflows** — e.g. generating a credit summary for all flagged accounts overnight —
+where no interactive RM session exists.  For interactive RM queries use OBO, which
+carries the RM's `oid` for per-RM row-level security.
+
+```
+I want to add an "entra-agent" demo mode to "SME Lending Advisor".
+
+1. mcp-servers/core-banking/server.py:
+   Replace: auth_provider = EntraTokenVerifier()
+   With:    auth_provider = AgentIdentityTokenVerifier()
+   Backward-compatible -- existing OBO/user token flows unchanged.
+
+2. mcp-servers/core-banking/.env: add AGENT_IDENTITY_ID=<agent-sp-object-id>
+
+3. backend/app/agents/credit_eligibility_agent.py + facility_agent.py build_tools():
+   Add entra-agent branch (see template/backend/app/agents/agent_a.py Option b2):
+     elif demo_mode == "entra-agent":
+         from app.core.auth.agent_identity import build_agent_identity_http_client
+         http_client = build_agent_identity_http_client(
+             settings=settings,
+             audience=f"api://{getattr(settings, 'core_banking_mcp_client_id', '')}",
+             fallback_bearer=mcp_auth_token or "",
+         )
+
+4. backend/app/config.py: add agent_blueprint_client_id: str = ""
+5. backend/.env.example: add AGENT_BLUEPRINT_CLIENT_ID=
+6. backend/app/routes/chat.py: confirm "entra-agent" is in _VALID_DEMO_MODES
+
+Reference: backend/app/agents/private_data.py, backend/app/core/auth/agent_identity.py
+Local dev note: DefaultAzureCredential locally resolves to az login (user token).
+For a true app-only token locally, set AZURE_CLIENT_ID/SECRET/TENANT_ID in backend/.env
+pointing to a stand-in SP.
+```
+
+---
+
 Part B: Seed Script
   File: scripts/seed-banking-db.py
 

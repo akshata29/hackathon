@@ -104,6 +104,9 @@ TRUSTED_ISSUERS_RAW: str = os.getenv("TRUSTED_ISSUERS", "")
 # Public HTTPS URL of this server (used in PRM responses and WWW-Authenticate headers).
 # If unset, the URL is inferred from the incoming request (works for local dev).
 RESOURCE_URL: str = os.getenv("RESOURCE_URL", "")
+# Expected OID of the backend agent identity service principal.
+# Leave empty to accept any valid app-only Entra token (less restrictive — dev/testing only).
+AGENT_IDENTITY_ID: str = os.getenv("AGENT_IDENTITY_ID", "")
 
 _WELL_KNOWN_OPENID = (
     "https://login.microsoftonline.com/{tenant_id}/v2.0/.well-known/openid-configuration"
@@ -376,6 +379,43 @@ class MultiIDPTokenVerifier(EntraTokenVerifier):
             return None
 
 
+class AgentIdentityTokenVerifier(MultiIDPTokenVerifier):
+    """Validates tokens issued to the backend's agent identity (no user OBO).
+
+    The backend acquires an app-only token via DefaultAzureCredential (Managed
+    Identity / agent blueprint credential — no stored client secret).  Unlike
+    delegated OBO tokens, these carry no ``scp`` claim; they carry ``roles``
+    and an ``oid`` that identifies the service principal.
+
+    This class inherits all existing validation from MultiIDPTokenVerifier
+    (signature, audience, issuer, multi-IDP support) and adds one extra check:
+    when ``AGENT_IDENTITY_ID`` is set, app-only tokens (no ``scp``) must have a
+    matching ``oid``.  Delegated user tokens (with ``scp``) are still accepted
+    unchanged so that ``entra`` / ``multi-idp`` modes are not affected.
+
+    Activation:
+        Set ``AGENT_IDENTITY_ID`` to the agentIdentityId (OID of the Entra
+        service principal) shown in the Azure portal under the Foundry project.
+        Leave it empty to accept any app-only Entra token (dev/testing only).
+    """
+
+    async def verify_token(self, token: str) -> AccessToken | None:
+        result = await super().verify_token(token)
+        if result is None:
+            return None
+        # Only apply the oid guard for app-only tokens (no delegated scp claim).
+        if AGENT_IDENTITY_ID and not (result.claims or {}).get("scp"):
+            oid = (result.claims or {}).get("oid", "")
+            if oid != AGENT_IDENTITY_ID:
+                logger.warning(
+                    "AgentIdentityTokenVerifier: rejected app-only token oid=%r (expected %r)",
+                    oid,
+                    AGENT_IDENTITY_ID,
+                )
+                return None
+        return result
+
+
 # ---------------------------------------------------------------------------
 # Helpers for use inside MCP tool functions
 # ---------------------------------------------------------------------------
@@ -456,6 +496,10 @@ def check_scope(required_scope: str) -> None:
     # 'mcp.call' app role grants access to all tools (used by the okta-proxy).
     scopes = claims.get("scp", "").split()
     roles: list = claims.get("roles", [])
+    # Agent-identity tokens (app-only, no scp): already oid-pinned by
+    # AgentIdentityTokenVerifier — grant access without scope check.
+    if not scopes and AGENT_IDENTITY_ID and claims.get("oid") == AGENT_IDENTITY_ID:
+        return
     if required_scope not in scopes and required_scope not in roles and "mcp.call" not in roles:
         logger.warning(
             "Scope check failed: required=%s scp=%s roles=%s oid=%s",

@@ -214,6 +214,11 @@ class GitHubIntelAgent(BaseAgent):
         "GitHub engineering activity for tech stocks: commit velocity, release cadence, "
         "open issues, developer mindshare (requires GitHub connection)"
     )
+    example_queries: list = [
+        "Show recent commit activity for Microsoft's GitHub repos",
+        "What is the open-source engineering velocity for MSFT?",
+        "How active is the NVDA developer community on GitHub?",
+    ]
     system_message = GITHUB_INTEL_INSTRUCTIONS
 
     @classmethod

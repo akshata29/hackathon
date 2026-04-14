@@ -48,6 +48,7 @@ implemented and runnable locally:
 | `entra` (default) | Full Entra OBO flow. Token signed by Entra, validated by JWKS, exchanged for MCP-scoped OBO token. |
 | `multi-idp` | Backend fetches a mock Okta JWT (signed by local mock OIDC server). The JWT is sent **directly** to the MCP server. The MCP server's `MultiIDPTokenVerifier` validates it against the mock OIDC issuer's JWKS. |
 | `okta-proxy` | Same mock JWT is sent to the Okta proxy (port 8003) instead of the MCP server directly. The proxy validates the mock JWT and substitutes a service-level credential before forwarding to the real MCP server. |
+| `entra-agent` | Backend acquires an **app-only** Entra token using its own identity (no user OBO). MCP servers validate via `AgentIdentityTokenVerifier` (OID-pinned, no `scp` check). **Locally:** `DefaultAzureCredential` resolves to `az login` (your user account) or the `finagents` stand-in SP — not a real Foundry agent identity. **On Azure Container Apps:** Managed Identity + federated credential chain produces a genuine Entra Agent ID token. See [Local Dev vs. Real Entra Agent ID](#local-dev-vs-real-entra-agent-id-what-you-actually-see-in-each-environment) in the auth doc. |
 
 ---
 
@@ -991,6 +992,22 @@ restart are signed with the old key and will fail JWKS verification.  The MCP se
 cache JWKS for `JWKS_CACHE_TTL` seconds (default 1 hour) — to force immediate cache
 bust, restart the MCP servers or set `JWKS_CACHE_TTL=0` in their `.env` files.
 
+### `entra-agent` mode: what to say during the demo
+
+The Agent ID mode works locally but uses a **stand-in service principal** (`finagents`)
+instead of a genuine Foundry-provisioned agent identity.  This is expected and intentional.
+
+**What to say:** *"In this mode the backend authenticates as the agent itself — no user
+OBO, no user context in the token.  The MCP server validates the token is from our
+registered agent using OID pinning.  Locally we use a stand-in SP; in production on
+Container Apps, DefaultAzureCredential picks up the Managed Identity federated to the
+Foundry agent blueprint — that's when you'd see it in Entra's Agent ID sign-in logs."*
+
+**What NOT to do during the demo:** do not open Entra > Agent ID > Sign-in logs and
+expect to find entries — you won't, because `finagents` is not a first-class Agent ID
+object.  Open Entra > Sign-in logs > Service principal sign-ins and filter by app name
+`finagents` to show the actual sign-in activity.
+
 ---
 
 ## 13. Troubleshooting Reference
@@ -1007,6 +1024,9 @@ bust, restart the MCP servers or set `JWKS_CACHE_TTL=0` in their `.env` files.
 | Previous `previous_response_not_found` Foundry 400 | Flag removed previously to fix a different bug; agents sharing one client is fine WITH the flag | Flag re-added; all agents share `self._client` |
 | Sessions not appearing in history panel | `sessions.py` used `oid` but chat stored by `preferred_username` | Fixed: `_get_user_id()` now uses same preference order as `AuthContext.user_id` |
 | `audience must be a string or None` (python-jose) | Passing a list for `audience` to `jwt.decode()` even with `verify_aud=False` | Fixed: `audience=None` + manual `aud` check in middleware |
+| `entra-agent` mode: no entries in Entra > Agent ID > Sign-in logs | `finagents` is a manually-created SP, not a Foundry-provisioned agent identity — `isAgent:true` flag is absent | Expected locally. Show auth activity under Entra > Sign-in logs > Service principal sign-ins, filtered by app name `finagents` |
+| `entra-agent` mode: UI stuck loading after MCP tool call | `DefaultAzureCredential` falling through to `AzureCliCredential` re-spawns `az` subprocess on each token refresh; Windows ProactorEventLoop IOCP contention can delay follow-up Foundry LLM call | Fixed: credential instance cached in `AgentIdentityAuth`; `asyncio.timeout(120)` added as safety net in `BaseOrchestrator.run_handoff()` |
+| `entra-agent` mode: MCP returns 403, logs show `oid mismatch` | `AGENT_IDENTITY_ID` in MCP `.env` doesn't match the OID of the SP `DefaultAzureCredential` resolved to | Run `az account show` — the OID in the token is your user OID, not `finagents`; log in as the SP or update `AGENT_IDENTITY_ID` to match |
 | `AADSTS50013` OBO failure | Token being used as OBO assertion had `aud=https://graph.microsoft.com` | Fixed: `tokenRequest` now requests `api://<clientId>/Chat.Read`, not User.Read |
 | `AADSTS500011` resource not found | `identifierUris` was empty on backend app reg | Fix: `az ad app update --identifier-uris api://<clientId>` |
 | v1 issuer rejection (`sts.windows.net`) | `requestedAccessTokenVersion` was `null` → issued v1 tokens | Fix: PATCH app manifest to set `requestedAccessTokenVersion=2` |

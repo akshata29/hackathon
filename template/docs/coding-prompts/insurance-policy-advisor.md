@@ -494,6 +494,50 @@ Follow mcp-servers/portfolio-db/server.py as the reference implementation.
 
 ---
 
+## Step 8c — Enable Entra Agent Identity Mode (Optional, entra-agent demo)
+
+> Skip if you only need the default OBO flow.  Use when you want to show the backend
+> calling the policy-db MCP under its **own Entra identity** — no user OBO, no stored secret.
+>
+> Full prompt template: [template/docs/coding-prompts/README.md -> Step 4c](./README.md)
+
+**Policy Intelligence Advisor note**: agent-identity mode suits **underwriter batch
+workflows** — e.g. scanning all policies for unapplied discounts overnight — where no
+interactive policyholder session exists.  For interactive queries use OBO, which
+carries the policyholder's `oid` for per-customer row-level security.
+
+```
+I want to add an "entra-agent" demo mode to "Policy Intelligence Advisor".
+
+1. mcp-servers/policy-db/server.py:
+   Replace: auth_provider = EntraTokenVerifier()
+   With:    auth_provider = AgentIdentityTokenVerifier()
+   Backward-compatible -- existing OBO/user token flows unchanged.
+
+2. mcp-servers/policy-db/.env: add AGENT_IDENTITY_ID=<agent-sp-object-id>
+
+3. backend/app/agents/policy_agent.py + premium_agent.py build_tools():
+   Add entra-agent branch (see template/backend/app/agents/agent_a.py Option b2):
+     elif demo_mode == "entra-agent":
+         from app.core.auth.agent_identity import build_agent_identity_http_client
+         http_client = build_agent_identity_http_client(
+             settings=settings,
+             audience=f"api://{getattr(settings, 'policy_mcp_client_id', '')}",
+             fallback_bearer=mcp_auth_token or "",
+         )
+
+4. backend/app/config.py: add agent_blueprint_client_id: str = ""
+5. backend/.env.example: add AGENT_BLUEPRINT_CLIENT_ID=
+6. backend/app/routes/chat.py: confirm "entra-agent" is in _VALID_DEMO_MODES
+
+Reference: backend/app/agents/private_data.py, backend/app/core/auth/agent_identity.py
+Local dev note: DefaultAzureCredential locally resolves to az login (user token).
+For a true app-only token locally, set AZURE_CLIENT_ID/SECRET/TENANT_ID in backend/.env
+pointing to a stand-in SP.
+```
+
+---
+
 ## Step 9 — Generate Synthetic Data for Local Development
 
 ```

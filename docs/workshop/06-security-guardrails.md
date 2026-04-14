@@ -241,4 +241,74 @@ domain-specific example prompts in the sidebar, and your dashboard layout.
 
 ---
 
+## Part D: Authentication Demo Modes & Security Trace Panel (Optional)
+
+> This section covers how to surface different auth flows in the frontend UI —
+> useful when demoing the app to a technical audience.  Skip if you only need the
+> `entra` (default) OBO mode.
+
+### Auth demo modes overview
+
+The portfolio reference app supports four `demo_mode` values selectable in the navbar:
+
+| Mode | Auth mechanism | What it proves |
+|------|---------------|----------------|
+| `entra` (default) | User OBO token → MCP-scoped Entra JWT | Standard delegated identity end-to-end |
+| `multi-idp` | Mock Okta JWT validated directly by MCP | MCP accepts multiple IdPs without token exchange |
+| `okta-proxy` | Mock Okta JWT → proxy swaps in service token | Edge proxy normalises cross-IdP tokens |
+| `entra-agent` | App-only Entra token via DefaultAzureCredential | Agent acts under its own identity, no user OBO |
+
+Full deep-dive: [docs/architecture/auth-and-mcp-patterns.md](../architecture/auth-and-mcp-patterns.md)
+
+### Adding the entra-agent mode to your own app
+
+If you completed Step 4c (entra-agent) in module 04, you need three frontend additions:
+
+**1. Add `'entra-agent'` to your `DemoMode` type** (`src/App.tsx` or `src/types.ts`):
+
+```typescript
+// Before
+type DemoMode = 'entra' | 'multi-idp' | 'okta-proxy';
+// After
+type DemoMode = 'entra' | 'multi-idp' | 'okta-proxy' | 'entra-agent';
+```
+
+**2. Add the Agent ID button to `NavBar.tsx`** (or wherever your mode switcher lives):
+
+```tsx
+<button
+  onClick={() => setDemoMode('entra-agent')}
+  className={`... ${demoMode === 'entra-agent' ? 'bg-violet-600' : 'bg-gray-700'}`}
+>
+  Agent ID
+</button>
+```
+
+**3. Add the security trace entry to `AuthFlowPanel.tsx`** for the entra-agent pattern
+so reviewers can see the flow visually.  Reference the portfolio implementation:
+`frontend/src/components/AuthFlowPanel.tsx` — search for `"entra-agent"` entries in
+`PatternKey` and `FLOWS` to copy the pattern.
+
+### What the Security Trace Panel shows (per mode)
+
+| Mode | Key steps shown in the panel |
+|------|------------------------------|
+| `entra` | Browser MSAL → Entra JWT → Backend OBO exchange → MCP JWKS validation → per-user RLS |
+| `entra-agent` | No user OBO → DefaultAzureCredential → app-only JWT → AgentIdentityTokenVerifier (oid-pinned) → shared access |
+| `multi-idp` | Browser MSAL → Mock OIDC token → Backend passes-through → MultiIDPTokenVerifier → JWKS of mock IdP |
+| `okta-proxy` | Mock Okta JWT → Okta proxy validates + substitutes service token → MCP → proxied identity |
+
+### Local dev caveat for entra-agent in the UI
+
+The security trace panel shows "DefaultAzureCredential → Entra ID → app-only token".  Locally
+this is accurate at the code level, but as noted in module 04, `DefaultAzureCredential` will
+resolve to your `az login` user (a user token) unless configured with `EnvironmentCredential`
+pointing to a stand-in SP.  When demoing, acknowledge this:
+
+> *"The code path is identical.  Locally this falls back to az login; in production on
+> Container Apps the Managed Identity + Foundry blueprint federated credential chain runs
+> automatically and you'd see a first-class Agent ID token in the Entra portal."*
+
+---
+
 ## Next: [Module 07 — Security, Guardrails & Deployment](./07-compaction.md)

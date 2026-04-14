@@ -28,6 +28,12 @@ extending the system or adapting patterns to a new use-case.
     - [Option B — Multi-IDP Trust on MCP Server](#option-b--multi-idp-trust-on-mcp-server-already-implemented)
     - [Option C — Okta-to-Entra Token Exchange Proxy](#option-c--okta-to-entra-token-exchange-proxy-implemented-in-this-repo)
     - [Option D — Entra External Identities Federation with Okta](#option-d--entra-external-identities-federation-with-okta-strategic)
+14. [Entra Agent Identity Mode (`entra-agent`)](#14-entra-agent-identity-mode-entra-agent)
+    - [What is Entra Agent ID?](#what-is-entra-agent-id)
+    - [Token Flow](#token-flow)
+    - [Code Reference](#code-reference)
+    - [Environment Variables](#environment-variables-entra-agent-mode)
+    - [A2A Server Security Upgrade](#a2a-server-security-upgrade)
 
 ---
 
@@ -1391,3 +1397,288 @@ now a first-class Entra identity.
 | Simulated in this repo | No (APIM required) | Yes — `6_run_mock_oidc.bat` | Yes — `7_run_okta_proxy.bat` | No |
 | Production-ready | Yes | Yes | Yes (with Entra creds) | Yes (after setup) |
 | Recommended phase | Fastest path | If Okta audience configurable | Demo / audit logging | Long-term target |
+
+---
+
+## 14. Entra Agent Identity Mode (`entra-agent`)
+
+`demo_mode=entra-agent` is a fourth authentication mode that enables **agent-to-service**
+authentication using the [Entra Agent ID platform](https://learn.microsoft.com/en-us/entra/identity-platform/agents/overview-agent-identity-platform) (Microsoft 365 Copilot + Frontier preview).
+
+### What is Entra Agent ID?
+
+Entra Agent ID lets you create a first-class identity for an AI agent — an **agent blueprint**
+with a federated credential (no stored client secret, no certificate rotation).  The blueprint is
+an Entra app registration whose token acquisition is delegated to the managed identity of the
+hosting compute (e.g. the backend Container App).
+
+Instead of storing `ENTRA_CLIENT_SECRET` in Key Vault and rotating it periodically, the agent
+acquires tokens by calling `DefaultAzureCredential` — which resolves to the Container App's
+managed identity in production, or to `az login` / environment variables in development.  The
+resulting JWT is a standard Entra app-only token (no `scp` claim; carries `roles` and the `oid`
+of the agent service principal).
+
+**When to choose `entra-agent` over `entra` (OBO):**
+
+| Dimension | `entra` (OBO) | `entra-agent` (Agent ID) |
+|---|---|---|
+| User identity propagated | Yes — `oid` preserved end-to-end | No — agent service principal is the identity |
+| Per-user SQL row-level security | Yes | No (shared / demo access) |
+| Client secret required | Yes (`ENTRA_CLIENT_SECRET`) | No (Managed Identity / agent blueprint) |
+| Best for | Production multi-user data isolation | Agent batch workflows, single-tenant demos |
+| Requires | Entra P1 + app registration | Microsoft 365 Copilot + Frontier preview |
+
+---
+
+### LOCAL DEV vs. REAL ENTRA AGENT ID — What You Actually See in Each Environment
+
+> **Read this before demoing.** The `entra-agent` mode is implemented correctly in code
+> but the runtime credential chain behaves differently locally versus on Azure.  This
+> causes observable differences in the Entra portal (Agent ID > Sign-in logs) that can
+> be confusing.
+
+#### What Entra Agent ID actually requires
+
+The key mechanism is a **federated credential**:
+
+```
+Azure Compute Managed Identity
+    --[federated credential]--> Agent Identity Blueprint (Entra app reg)
+                                    |
+                                    | get_token("api://<mcp>/.default")
+                                    v
+                               App-only JWT (oid = agent blueprint SP)
+```
+
+The federated credential is **injected by Azure compute at runtime** — it's a signed
+workload identity token that only exists inside Container Apps / AKS pods.  There is no
+equivalent outside Azure compute — no secret, no certificate, nothing you can copy.
+
+This means:
+
+| Environment | `DefaultAzureCredential` resolves to | Token `oid` | Appears in Agent ID sign-in logs? |
+|---|---|---|---|
+| **Local dev** (`az login`) | Your personal user account | Your user OID | No — shows under User sign-ins (non-interactive) |
+| **Local dev** (`az login --service-principal --username <finagents>`) | `finagents` stand-in SP | `aac653b8` | No — `isAgent:true` flag absent (manually created SP) |
+| **Azure Container Apps (deployed)** | Managed Identity → blueprint federated credential | Agent blueprint SP OID | **Yes** — first-class Agent ID token, `isAgent:true` |
+
+#### What `finagents` is and why it exists
+
+`finagents` (appId `fb3c0e70`, OID `aac653b8`) is a **manually-created Entra app
+registration** that acts as a local stand-in for the Foundry-provisioned agent identity.
+It was created because:
+
+- The real federated credential chain only works on Azure compute
+- Local dev needs *some* service principal to produce an app-only token
+- `az login` (the developer's personal account) would produce a **user token**, not
+  an app-only token — the MCP scope bypass logic would not apply correctly
+
+`finagents` is NOT a first-class Entra Agent ID object.  It does not appear in "All agent
+identities" in the portal.  It was not provisioned by Foundry.
+
+#### What the demo proves vs. what it defers to production
+
+| Aspect | Verified locally with `finagents` | Only on Azure with real Agent ID |
+|---|---|---|
+| App-only token (no `scp` claim) | Yes | Yes |
+| OID-pinned MCP access control | Yes | Yes |
+| No user OBO required | Yes | Yes |
+| `AgentIdentityAuth` credential caching | Yes | Yes |
+| Token appears in Agent ID > Sign-in logs | **No** | **Yes** |
+| `isAgent: true` attribute on token | **No** | **Yes** |
+| Federated credential (no stored secret) | **No** (uses `az login`) | **Yes** |
+| Zero-secret rotation | **No** | **Yes** |
+
+**For the demo:** the code path is identical — the auth pattern, MCP validation, and
+security trace panel are accurate.  The caveat to state aloud: *"locally this uses a
+stand-in SP; in production on Container Apps the federated Managed Identity chain kicks
+in and you'd see it in the Agent ID portal."*
+
+#### What you'd see in the Entra portal for each mode (quick reference)
+
+| Demo mode | Where to look in Entra portal | What you see |
+|---|---|---|
+| `entra` (OBO) | Entra > Sign-in logs > User sign-ins (non-interactive) | Sign-ins with your user OID, app = backend API reg |
+| `entra-agent` (local dev) | Entra > Sign-in logs > User sign-ins (non-interactive) | Sign-ins with your user OID (az login) OR `finagents` SP sign-ins under Service principal sign-ins |
+| `entra-agent` (Azure deployed) | Entra > Agent ID > Sign-in logs > Service principal sign-ins | Agent blueprint SP sign-ins with `isAgent: true` |
+
+---
+
+### Token Flow
+
+```
+Browser / SPA
+    |
+    |  (no user token required — agent authenticates itself)
+    v
+FastAPI Backend  (Container App, has Managed Identity)
+    |
+    |  DefaultAzureCredential.get_token("api://<mcp-client-id>/.default")
+    |  (resolves via Managed Identity in prod, az login / env in dev)
+    v
+Entra ID
+    |  Issues app-only JWT:
+    |    aud  = api://<mcp-client-id>
+    |    oid  = <agent service principal object ID>
+    |    (no scp claim — this is client_credentials / agent flow)
+    v
+FastAPI Backend (AgentIdentityAuth.async_auth_flow)
+    |  Attaches "Authorization: Bearer <agent-token>" to every MCP request
+    v
+MCP Server (portfolio-db or yahoo-finance, AgentIdentityTokenVerifier)
+    |  1. Validates RS256 signature against Entra JWKS
+    |  2. Checks audience = api://<MCP_CLIENT_ID>
+    |  3. Checks issuer = login.microsoftonline.com or sts.windows.net
+    |  4. For app-only tokens (no scp): checks oid == AGENT_IDENTITY_ID (when set)
+    v
+Data / yfinance (shared access — no per-user RLS in agent mode)
+```
+
+**A2A path (ESG Advisor):**
+
+```
+FastAPI Backend
+    |
+    |  DefaultAzureCredential.get_token("api://<esg-client-id>/.default")
+    v
+Entra ID  -->  app-only JWT (aud=api://<esg-client-id>, oid=agent)
+    v
+ESG A2A Server (_AgentAuthMiddleware)
+    |  1. Validates RS256 via Entra JWKS (httpx + jose)
+    |  2. Checks oid == AGENT_IDENTITY_ID when ESG_REQUIRE_AGENT_AUTH=true
+    v
+LangChain ReAct Agent  (ESG analysis)
+```
+
+---
+
+### Code Reference
+
+| File | Class / Function | Role |
+|---|---|---|
+| `backend/app/core/auth/agent_identity.py` | `AgentIdentityAuth` | `httpx.Auth` implementation; acquires token via `DefaultAzureCredential` |
+| `backend/app/core/auth/agent_identity.py` | `build_agent_identity_http_client()` | Factory; mirrors `build_obo_http_client()` signature for drop-in use |
+| `backend/app/agents/portfolio_data.py` | `build_tools()` — `elif demo_mode == "entra-agent":` | Wires `AgentIdentityAuth` for Portfolio DB MCP calls |
+| `backend/app/agents/private_data.py` | `build_tools()` — `elif demo_mode == "entra-agent":` | Wires `AgentIdentityAuth` for Yahoo Finance MCP calls |
+| `backend/app/routes/chat.py` | `_VALID_DEMO_MODES` | Accepts `"entra-agent"` as a valid mode |
+| `mcp-servers/portfolio-db/entra_auth.py` | `AgentIdentityTokenVerifier` | Extends `MultiIDPTokenVerifier`; adds `oid` guard for app-only tokens |
+| `mcp-servers/yahoo-finance/entra_auth.py` | `AgentIdentityTokenVerifier` | Identical to portfolio-db version |
+| `mcp-servers/portfolio-db/server.py` | `auth_provider` | Swapped from `MultiIDPTokenVerifier()` to `AgentIdentityTokenVerifier()` |
+| `mcp-servers/yahoo-finance/server.py` | `auth_provider` | Same swap |
+| `a2a-agents/esg-advisor/server.py` | `_AgentAuthMiddleware`, `_verify_esg_bearer()` | Pure-ASGI middleware; validates Entra Bearer; gated by `ESG_REQUIRE_AGENT_AUTH` |
+| `frontend/src/App.tsx` | `DemoMode` | Union type extended with `'entra-agent'` |
+| `frontend/src/components/NavBar.tsx` | Auth mode toggle | 4th button "Agent ID" (violet styling) |
+| `frontend/src/components/AuthFlowPanel.tsx` | `PatternKey`, `FLOWS` | Adds `entra-agent` pattern and two flow definitions |
+
+#### `AgentIdentityAuth` — key implementation detail
+
+```python
+# backend/app/core/auth/agent_identity.py
+
+class AgentIdentityAuth(httpx.Auth):
+    """httpx.Auth that acquires an Entra app-only token via DefaultAzureCredential."""
+
+    async def async_auth_flow(self, request):
+        if not self._token or self._is_expired():
+            self._token = await self._acquire()
+        request.headers["Authorization"] = f"Bearer {self._token.token}"
+        response = yield request
+        if response.status_code == 401:
+            self._token = None              # force refresh on next request
+            self._token = await self._acquire()
+            request.headers["Authorization"] = f"Bearer {self._token.token}"
+            yield request
+
+    async def _acquire(self):
+        from azure.identity.aio import DefaultAzureCredential
+        async with DefaultAzureCredential() as cred:
+            return await cred.get_token(self._audience + "/.default")
+```
+
+#### `AgentIdentityTokenVerifier` — backward-compatible extension
+
+```python
+# mcp-servers/portfolio-db/entra_auth.py  (identical in yahoo-finance)
+
+class AgentIdentityTokenVerifier(MultiIDPTokenVerifier):
+    """Adds optional oid guard for app-only tokens on top of MultiIDPTokenVerifier."""
+
+    async def verify_token(self, token: str) -> AccessToken | None:
+        result = await super().verify_token(token)   # all existing validation unchanged
+        if result is None:
+            return None
+        # Only apply the oid guard for app-only tokens (no delegated scp claim)
+        if AGENT_IDENTITY_ID and not (result.claims or {}).get("scp"):
+            oid = (result.claims or {}).get("oid", "")
+            if oid != AGENT_IDENTITY_ID:
+                logger.warning("Rejected app-only token oid=%r (expected %r)", oid, AGENT_IDENTITY_ID)
+                return None
+        return result
+```
+
+The class inherits from `MultiIDPTokenVerifier` (not just `EntraTokenVerifier`) so that
+all existing `entra` / `multi-idp` / `okta-proxy` validation paths remain unchanged.  The
+`oid` guard engages **only** when the token has no `scp` claim (app-only) and
+`AGENT_IDENTITY_ID` is non-empty.
+
+---
+
+### Environment Variables (entra-agent mode)
+
+**Backend (`backend/.env` / Container App env):**
+
+| Variable | Description | Example |
+|---|---|---|
+| `AGENT_BLUEPRINT_CLIENT_ID` | Client ID of the agent blueprint app registration (from Foundry project JSON view) | `00000000-0000-0000-0000-000000000001` |
+| `AGENT_IDENTITY_ID` | Object ID (`oid`) of the agent service principal — used by `AgentIdentityAuth` | `00000000-0000-0000-0000-000000000002` |
+| `ESG_A2A_AUDIENCE` | Audience to request when calling ESG A2A server — `api://<esg-client-id>` | `api://esg-server-app-reg-id` |
+
+**MCP servers (`mcp-servers/portfolio-db/.env`, `mcp-servers/yahoo-finance/.env`):**
+
+| Variable | Description |
+|---|---|
+| `AGENT_IDENTITY_ID` | Same OID as backend — MCP verifier checks incoming tokens match this agent |
+
+Leave `AGENT_IDENTITY_ID` empty to accept **any** app-only Entra token (less restrictive;
+acceptable for local development but not recommended for production).
+
+**ESG A2A server (`a2a-agents/esg-advisor/.env`):**
+
+| Variable | Description | Default |
+|---|---|---|
+| `ESG_REQUIRE_AGENT_AUTH` | Set to `true` to enable Bearer token validation | `false` (unauthenticated) |
+| `ENTRA_TENANT_ID` | Tenant for JWKS discovery | — |
+| `ESG_CLIENT_ID` | App registration client ID for this server (validates `aud` claim) | — |
+| `AGENT_IDENTITY_ID` | Expected agent oid (same value as backend/MCP) | — |
+
+---
+
+### A2A Server Security Upgrade
+
+Before `entra-agent` mode, the ESG Advisor A2A server accepted requests from **any caller**
+on the internal network with zero authentication.  This created a horizontal movement risk
+if any other Container App was compromised.
+
+After:
+
+```
+Before:  any caller  -->  ESG A2A (no auth)  -->  LangChain ReAct  -->  yfinance
+After:   backend (agent identity token)
+              |
+              v
+         _AgentAuthMiddleware
+              |
+              |  _verify_esg_bearer(): JWKS + audience + oid check
+              v
+         ESG A2A (accepts only the registered agent identity)
+              v
+         LangChain ReAct  -->  yfinance
+```
+
+The middleware is a **pure ASGI wrapper** — no Starlette framework dependency, stackable
+with any ASGI app.  The `/.well-known/agent.json` discovery endpoint is exempt so that
+A2A capability negotiation remains unauthenticated (same as all A2A server implementations).
+
+**Gating:** `ESG_REQUIRE_AGENT_AUTH=false` by default preserves backward compatibility
+with the original unauthenticated `a2a` demo mode.  Set it to `true` only when
+`ENTRA_TENANT_ID`, `ESG_CLIENT_ID`, and `AGENT_IDENTITY_ID` are all configured.

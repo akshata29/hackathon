@@ -68,6 +68,24 @@ class Settings(BaseSettings):
     portfolio_mcp_client_id: str = ""   # api://<id>/portfolio.read
     yahoo_mcp_client_id: str = ""       # api://<id>/market.read
 
+    # Entra Agent ID (preview) — agent-as-principal authentication for MCP + A2A.
+    # Reference: https://learn.microsoft.com/en-us/azure/foundry/agents/concepts/agent-identity
+    #
+    # agent_blueprint_client_id: The client ID of the agent identity blueprint's
+    #   app registration in Entra.  Found on the Foundry project resource in Azure
+    #   portal > Overview > JSON View (agentIdentityBlueprintClientId).
+    #   Leave empty to disable agent identity mode (falls back to OBO / static token).
+    #
+    # agent_identity_id: The agentIdentityId from the same JSON view.
+    #   Used by MCP / A2A servers to verify the caller is this specific agent.
+    #
+    # esg_a2a_audience: Resource identifier (audience) for the ESG A2A server.
+    #   Typically api://<esg-app-registration-client-id> once the app reg is created.
+    #   Leave empty to skip agent-identity auth on the A2A call (unauthenticated).
+    agent_blueprint_client_id: str = ""
+    agent_identity_id: str = ""
+    esg_a2a_audience: str = ""
+
     @property
     def entra_audience(self) -> str:
         """JWT audience = the backend API app registration client ID."""

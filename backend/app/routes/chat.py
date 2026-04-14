@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-_VALID_DEMO_MODES = {"entra", "multi-idp", "okta-proxy"}
+_VALID_DEMO_MODES = {"entra", "multi-idp", "okta-proxy", "entra-agent"}
 
 
 class ChatRequest(BaseModel):
@@ -34,11 +34,15 @@ class ChatRequest(BaseModel):
     session_id: str | None = None
     mode: str = "handoff"  # "handoff" | "comprehensive"
     # demo_mode controls which auth path the backend uses to reach MCP servers:
-    #   "entra"      — default; Entra OBO token exchange (production flow)
-    #   "multi-idp"  — Option B; backend presents a mock Okta JWT directly to MCP
-    #                  (MCP uses MultiIDPTokenVerifier to validate both Entra + Okta)
-    #   "okta-proxy" — Option C; Yahoo Finance calls routed through the Okta proxy
-    #                  (proxy validates mock Okta JWT and swaps in a service token)
+    #   "entra"       — default; Entra OBO token exchange (production flow)
+    #   "entra-agent" — Entra Agent Identity; backend's Managed Identity authenticates
+    #                   via agent identity blueprint (no client secret, no user OBO).
+    #                   Requires agent_blueprint_client_id in Settings.
+    #                   Reference: https://learn.microsoft.com/en-us/azure/foundry/agents/concepts/agent-identity
+    #   "multi-idp"   — Option B; backend presents a mock Okta JWT directly to MCP
+    #                   (MCP uses MultiIDPTokenVerifier to validate both Entra + Okta)
+    #   "okta-proxy"  — Option C; Yahoo Finance calls routed through the Okta proxy
+    #                   (proxy validates mock Okta JWT and swaps in a service token)
     demo_mode: str = "entra"
 
     def model_post_init(self, __context) -> None:

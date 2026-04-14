@@ -8,8 +8,11 @@ import { NavBar } from './components/NavBar'
 
 type Tab = 'chat' | 'dashboard'
 // demo_mode is passed to the backend with each chat request to select the MCP auth path.
-// 'entra' = production OBO flow; 'multi-idp' = Option B demo; 'okta-proxy' = Option C demo.
-export type DemoMode = 'entra' | 'multi-idp' | 'okta-proxy'
+// 'entra'       = production OBO flow (default)
+// 'multi-idp'   = Option B demo: MultiIDPTokenVerifier accepts a non-Entra JWT on the MCP server
+// 'okta-proxy'  = Option C demo: calls routed through an identity proxy (token swap)
+// 'entra-agent' = Option D demo: backend uses Entra Agent Identity (DefaultAzureCredential, no OBO)
+export type DemoMode = 'entra' | 'multi-idp' | 'okta-proxy' | 'entra-agent'
 
 // Placeholder dashboard rendered until you build your domain Dashboard component.
 function DashboardPlaceholder() {

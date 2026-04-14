@@ -26,6 +26,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from entra_auth import (
+    AgentIdentityTokenVerifier,
     EntraTokenVerifier,
     MultiIDPTokenVerifier,
     audit_log,
@@ -49,7 +50,7 @@ logger = logging.getLogger(__name__)
 # Dev mode (ENTRA_TENANT_ID not set): falls back to static MCP_AUTH_TOKEN
 # comparison inside EntraTokenVerifier.verify_token().
 # ---------------------------------------------------------------------------
-auth_provider = MultiIDPTokenVerifier()
+auth_provider = AgentIdentityTokenVerifier()
 
 mcp = FastMCP(
     name="portfolio-db-mcp",

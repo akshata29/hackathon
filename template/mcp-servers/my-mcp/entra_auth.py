@@ -51,6 +51,14 @@ _STATIC_DEV_TOKEN: str = os.getenv("MCP_AUTH_TOKEN", "dev-mcp-token-change-me")
 # Entra is always trusted.  Leave empty for Entra-only mode.
 TRUSTED_ISSUERS_RAW: str = os.getenv("TRUSTED_ISSUERS", "")
 
+# OID of the backend's agent identity service principal (Option D — entra-agent mode).
+# When set, AgentIdentityTokenVerifier enforces that app-only tokens must come from
+# this specific service principal.  Leave empty to accept any valid Entra app token.
+# Value: the Object ID (oid) shown in Entra > App registrations > <agent SP> > Overview.
+# Local dev:  set to the OID of the stand-in SP (finagents or az login SP).
+# Production: set to the Foundry-provisioned agent identity OID.
+AGENT_IDENTITY_ID: str = os.getenv("AGENT_IDENTITY_ID", "")
+
 _WELL_KNOWN_OPENID = (
     "https://login.microsoftonline.com/{tenant_id}/v2.0/.well-known/openid-configuration"
 )
@@ -264,6 +272,57 @@ class MultiIDPTokenVerifier(EntraTokenVerifier):
 
 
 # ---------------------------------------------------------------------------
+# Agent Identity token verifier (Option D — entra-agent mode)
+# ---------------------------------------------------------------------------
+
+class AgentIdentityTokenVerifier(MultiIDPTokenVerifier):
+    """Validates tokens issued to the backend's agent identity (no user OBO).
+
+    The backend acquires an app-only token via DefaultAzureCredential (Managed
+    Identity / Foundry blueprint federated credential — no stored client secret).
+    Unlike delegated OBO tokens, these carry no ``scp`` claim; they carry an
+    ``oid`` that identifies the agent service principal.
+
+    This class inherits all validation from MultiIDPTokenVerifier (JWKS signature,
+    audience, issuer checks) and adds one extra guard: when ``AGENT_IDENTITY_ID``
+    is set, app-only tokens (no ``scp``) must have a matching ``oid``.  Delegated
+    user tokens (with ``scp``) are accepted unchanged so ``entra`` / ``multi-idp``
+    modes still work transparently.
+
+    Activation in server.py::
+
+        auth_provider = AgentIdentityTokenVerifier()
+        mcp = FastMCP(name="my-mcp", auth=auth_provider)
+
+    Activation: set ``AGENT_IDENTITY_ID`` in .env to the agent SP OID.
+    Leave empty to accept any valid Entra app-only token (dev/testing only).
+
+    Local dev note:
+        DefaultAzureCredential locally resolves to your ``az login`` user account
+        (a user token, not an app-only token) OR to a stand-in service principal
+        if AZURE_CLIENT_ID/SECRET/TENANT_ID are configured via EnvironmentCredential.
+        In production on Container Apps, the Managed Identity + Foundry blueprint
+        federated credential produces a genuine Entra Agent ID token (isAgent=true).
+    """
+
+    async def verify_token(self, token: str) -> AccessToken | None:
+        result = await super().verify_token(token)
+        if result is None:
+            return None
+        # Only apply the oid guard for app-only tokens (no delegated scp claim).
+        if AGENT_IDENTITY_ID and not (result.claims or {}).get("scp"):
+            oid = (result.claims or {}).get("oid", "")
+            if oid != AGENT_IDENTITY_ID:
+                logger.warning(
+                    "AgentIdentityTokenVerifier: rejected app-only token oid=%r (expected %r)",
+                    oid,
+                    AGENT_IDENTITY_ID,
+                )
+                return None
+        return result
+
+
+# ---------------------------------------------------------------------------
 # Helpers for use inside MCP tool functions
 # ---------------------------------------------------------------------------
 
@@ -329,6 +388,10 @@ def check_scope(required_scope: str) -> None:
     claims = get_claims_from_request()
     scopes = claims.get("scp", "").split()
     roles: list = claims.get("roles", [])
+    # Agent-identity tokens (app-only, no scp): already oid-pinned by
+    # AgentIdentityTokenVerifier — grant access without an additional scope check.
+    if not scopes and AGENT_IDENTITY_ID and claims.get("oid") == AGENT_IDENTITY_ID:
+        return
     if required_scope not in scopes and required_scope not in roles and "mcp.call" not in roles:
         logger.warning(
             "Scope check failed: required=%s scp=%s roles=%s oid=%s",
