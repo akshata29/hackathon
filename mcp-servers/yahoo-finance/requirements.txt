@@ -6,4 +6,4 @@ azure-keyvault-secrets>=4.8.0
 azure-ai-contentsafety>=1.0.0
 azure-monitor-opentelemetry>=1.6.0
 yfinance>=0.2.40
-python-jose[cryptography]>=3.3.0
+python-jose[cryptography]>=3.5.0
