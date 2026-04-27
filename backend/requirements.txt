@@ -15,7 +15,7 @@ azure-ai-projects>=1.0.0
 # FastAPI backend
 fastapi>=0.115.0
 uvicorn[standard]>=0.32.0
-python-multipart>=0.0.12
+python-multipart>=0.0.26
 websockets>=13.1
 
 # Authentication
