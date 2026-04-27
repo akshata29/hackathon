@@ -32,7 +32,7 @@ opentelemetry-semantic-conventions-ai>=0.5.0
 # Utilities
 python-dotenv>=1.0.1
 pydantic>=2.10.0
-pydantic-settings>=2.8.0
+pydantic-settings>=2.14.0
 
 # Evaluation
 azure-ai-evaluation>=1.0.0
