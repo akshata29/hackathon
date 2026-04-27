@@ -1,7 +1,7 @@
 # Core agent framework
 # agent-framework[all] pulls in orchestrations, azure-ai-search, a2a, etc.
-agent-framework[all]>=1.0.0
-agent-framework-foundry>=1.0.0
+agent-framework[all]>=1.2.0
+agent-framework-foundry>=1.2.0
 
 # Azure SDK
 azure-identity>=1.21.0
