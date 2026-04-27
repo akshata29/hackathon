@@ -4,13 +4,13 @@ agent-framework[all]>=1.0.0
 agent-framework-foundry>=1.0.0
 
 # Azure SDK
-azure-identity>=1.21.0
-azure-cosmos>=4.7.0
-azure-keyvault-secrets>=4.9.0
-azure-monitor-opentelemetry>=1.6.0
+azure-identity>=1.25.3
+azure-cosmos>=4.15.0
+azure-keyvault-secrets>=4.11.0
+azure-monitor-opentelemetry>=1.8.7
 
 # Azure AI Foundry SDK
-azure-ai-projects>=1.0.0
+azure-ai-projects>=2.1.0
 
 # FastAPI backend
 fastapi>=0.115.0
@@ -35,4 +35,4 @@ pydantic>=2.10.0
 pydantic-settings>=2.8.0
 
 # Evaluation
-azure-ai-evaluation>=1.0.0
+azure-ai-evaluation>=1.16.5
