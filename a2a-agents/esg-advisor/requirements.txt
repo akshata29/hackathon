@@ -1,4 +1,4 @@
-a2a-sdk[http-server]>=0.3.23
+a2a-sdk[http-server]>=1.0.2
 langchain>=0.3.0
 langchain-openai>=0.3.0
 langchain-core>=0.3.0
